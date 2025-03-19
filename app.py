@@ -13,9 +13,6 @@ import concurrent.futures
 import threading
 import hashlib
 
-# Do not import dateparser to avoid dependency issues
-# Using standard library datetime instead
-
 # API configuration - getting from environment variables for cloud security
 PPLX_API_KEY = os.environ.get('PPLX_API_KEY', '')
 
@@ -97,298 +94,6 @@ def make_request(url):
         return response.text
     except Exception as e:
         st.error(f"Error fetching {url}: {e}")
-        return None
-
-# New date parsing function using standard library
-def parse_article_date(date_str):
-    """
-    Parse date strings from various formats to datetime objects.
-    Returns None if parsing fails.
-    """
-    if not date_str or "unknown" in date_str.lower():
-        return None
-    
-    # List of common date formats to try
-    date_formats = [
-        '%Y-%m-%d',                  # 2024-03-19
-        '%Y/%m/%d',                  # 2024/03/19
-        '%d %b %Y',                  # 19 Mar 2024
-        '%d %B %Y',                  # 19 March 2024
-        '%B %d, %Y',                 # March 19, 2024
-        '%b %d, %Y',                 # Mar 19, 2024
-        '%d-%m-%Y',                  # 19-03-2024
-        '%d/%m/%Y',                  # 19/03/2024
-        '%d %b %Y, %H:%M',           # 19 Mar 2024, 14:30
-        '%d %B %Y, %H:%M',           # 19 March 2024, 14:30
-        '%d %b %Y, %I:%M%p',         # 19 Mar 2024, 2:30pm
-        '%d %B %Y, %I:%M%p',         # 19 March 2024, 2:30pm
-        '%Y-%m-%dT%H:%M:%S',         # 2024-03-19T14:30:00 (ISO format)
-        '%Y-%m-%dT%H:%M:%SZ',        # 2024-03-19T14:30:00Z (ISO format with Z)
-        '%a, %d %b %Y %H:%M:%S %z',  # Mon, 19 Mar 2024 14:30:00 +0000 (RFC format)
-        '%b %d, %Y %I:%M %p',        # Mar 19, 2024 2:30 PM
-        '%d %b %Y %H:%M:%S',         # 19 Mar 2024 14:30:00
-        '%a %b %d %H:%M:%S %Y',      # Thu Mar 19 14:30:00 2024
-    ]
-    
-    # Clean the date string a bit
-    date_str = date_str.strip()
-    
-    # Try each format
-    for fmt in date_formats:
-        try:
-            dt = datetime.datetime.strptime(date_str, fmt)
-            # Ensure we're returning a naive datetime
-            if dt.tzinfo is not None:
-                dt = dt.replace(tzinfo=None)
-            return dt
-        except ValueError:
-            continue
-    
-    # If we got here, none of the formats worked
-    return None
-
-def extract_articles(html_content, source_url):
-    articles = []
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Look for article tags, divs with article class, or common blog post structures
-        potential_articles = (
-            soup.find_all('article') or 
-            soup.find_all('div', class_=['post', 'entry', 'blog-post', 'news-item']) or
-            soup.select('.post, .article, .blog-item, .news-entry')
-        )
-
-# Display incidents
-st.header("Detailed Incidents")
-
-if st.session_state.incidents_fetched:
-    if st.session_state.incidents:
-        for i, incident in enumerate(st.session_state.incidents, 1):
-            st.markdown(format_incident_card(incident, i), unsafe_allow_html=True)
-            
-            # Add expandable details section
-            with st.expander(f"View Details - {incident['title'][:50]}..."):
-                st.subheader("Affected Vendors")
-                if incident.get("vendors") and len(incident["vendors"]) > 0:
-                    st.write(", ".join(incident["vendors"]))
-                else:
-                    st.write("No specific vendors identified")
-                
-                st.subheader("Impact")
-                st.write(incident.get("impact", "No impact information available"))
-                
-                if incident.get("cve_ids") and len(incident["cve_ids"]) > 0:
-                    st.subheader("CVE IDs")
-                    st.write(", ".join(incident["cve_ids"]))
-                
-                if incident.get("mitigation"):
-                    st.subheader("Mitigation")
-                    st.write(incident["mitigation"])
-                
-                st.subheader("Severity Score")
-                severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
-                st.write(f"{severity} (Score: {incident.get('score', 0)})")
-                
-                # Add raw date information for debugging
-                if debug_mode:
-                    st.subheader("Date Information (Debug)")
-                    st.write(f"Raw date string: {incident.get('date', 'N/A')}")
-                    parsed_date = parse_article_date(incident.get('date', ''))
-                    st.write(f"Parsed date: {parsed_date}")
-                    cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
-                    cutoff = cutoff.replace(tzinfo=None)  # Ensure naive datetime
-                    st.write(f"Is newer than cutoff ({cutoff}): {parsed_date >= cutoff if parsed_date else 'Unknown'}")
-    else:
-        st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
-else:
-    st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest cybersecurity information.")
-
-# Display information about the app in the sidebar
-with st.sidebar:
-    st.title("About")
-    st.markdown("""
-    This app fetches and displays recent cybersecurity incidents affecting major vendors.
-    
-    **Features:**
-    - Monitors 25+ cybersecurity news sources
-    - Tracks incidents for 50+ major vendors
-    - Calculates severity scores
-    - Export data to CSV
-    
-    **How it works:**
-    1. Set the number of days to look back
-    2. Click "FETCH CYBERSECURITY INCIDENTS"
-    3. View and analyze the results
-    """)
-    
-    st.markdown("---")
-    st.subheader("Sources")
-    st.markdown("Data is collected from reputable cybersecurity sources including:")
-    sources_list = ["SANS ISC", "CISA", "Bleeping Computer", "Krebs on Security", "Talos Intelligence", "The Hacker News"]
-    for source in sources_list:
-        st.markdown(f"- {source}")
-
-    # Add contact information for cloud deployment
-    st.markdown("---")
-    st.subheader("Contact")
-    st.markdown("For questions or support, please contact: support@example.com")
-        
-        # If no structure found, look for headings with links
-        if not potential_articles:
-            potential_articles = soup.select('h1 a, h2 a, h3 a')
-            
-        for article in potential_articles:  # Limit to 10 articles per source
-            title_elem = article.find('h1') or article.find('h2') or article.find('h3') or article.find('a')
-            
-            if title_elem:
-                title = title_elem.text.strip()
-                link = None
-                
-                # Try to find the link
-                if title_elem.name == 'a':
-                    link = title_elem.get('href')
-                else:
-                    link_elem = title_elem.find('a')
-                    if link_elem:
-                        link = link_elem.get('href')
-                
-                # Make relative URLs absolute
-                if link and not link.startswith('http'):
-                    if link.startswith('/'):
-                        base_url = '/'.join(source_url.split('/')[:3])  # Get domain
-                        link = base_url + link
-                    else:
-                        link = source_url + link if source_url.endswith('/') else source_url + '/' + link
-                
-                # Try to find date with more robust selectors
-                date_elem = (
-                    article.find('time') or 
-                    article.select_one('.date, .meta-date, .published, .post-date, .entry-date, .post-meta') or
-                    article.find(attrs={"datetime": True})
-                )
-                
-                # If date element has datetime attribute, use that
-                if date_elem and date_elem.has_attr('datetime'):
-                    date = date_elem['datetime']
-                elif date_elem:
-                    date = date_elem.text.strip()
-                else:
-                    # Look for date pattern in text
-                    date_text = article.text
-                    date_matches = re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b', date_text)
-                    if date_matches:
-                        date = date_matches.group(0)
-                    else:
-                        date = "Unknown date"
-                
-                # Try to find description/summary
-                desc_elem = article.find('p') or article.select_one('.excerpt, .summary, .description')
-                description = desc_elem.text.strip() if desc_elem else ""
-                
-                if title and link:
-                    articles.append({
-                        "title": title,
-                        "link": link,
-                        "date": date,
-                        "description": description[:200] + "..." if len(description) > 200 else description,
-                        "source": source_url,
-                        "source_name": source_url.split('//')[-1].split('/')[0].replace('www.', '')
-                    })
-        
-    except Exception as e:
-        st.error(f"Error extracting articles from {source_url}: {e}")
-    
-    return articles
-
-# Updated process_source function with proper date filtering
-def process_source(source, days_to_look_back):
-    source_url = source["url"]
-    priority = source["priority"]
-    
-    # For SANS ISC diary archive, modify URL to include year and month
-    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
-        current_date = datetime.datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
-    
-    html_content = make_request(source_url)
-    
-    if not html_content:
-        return []
-    
-    articles = extract_articles(html_content, source_url)
-    
-    # Filter articles based on date
-    filtered_articles = []
-    cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_look_back)
-    
-    # Ensure the cutoff date is timezone naive
-    if cutoff_date.tzinfo is not None:
-        cutoff_date = cutoff_date.replace(tzinfo=None)
-    
-    for article in articles:
-        # Parse the date
-        article_date = parse_article_date(article["date"])
-        
-        # If we could parse the date, check if it's newer than cutoff
-        if article_date and article_date >= cutoff_date:
-            filtered_articles.append(article)
-        elif not article_date:
-            # If we couldn't parse the date, include the article but mark it
-            article["date_parsing_failed"] = True
-            filtered_articles.append(article)
-    
-    return filtered_articles
-
-def query_perplexity_api(query):
-    url = "https://api.perplexity.ai/chat/completions"
-    
-    # Skip API call if no API key is provided
-    if not PPLX_API_KEY:
-        return None
-    
-    payload = {
-        "model": "sonar",
-        "messages": [
-            {
-                "role": "system",
-                "content": """You are a cybersecurity expert specializing in finding the latest cybersecurity incidents, 
-                attacks, vulnerabilities, updates, and important security news. Focus on professional, 
-                actionable intelligence and filter out generic weekly summaries or non-specific content. 
-                Include detailed information about incidents, CVEs, patches, product releases, and security measures 
-                when available. Return your analysis in JSON format with the following structure:
-                {
-                    "type": "vulnerability|attack|patch|product_release|security_measure",
-                    "severity": "low|medium|high|critical",
-                    "affected_vendors": ["vendor1", "vendor2"],
-                    "cve_ids": ["CVE-XXXX-XXXX"],
-                    "impact": "Description of the impact",
-                    "iocs": ["indicator1", "indicator2"],
-                    "mitigation": "Steps to mitigate the issue"
-                }
-                """
-            },
-            {
-                "role": "user",
-                "content": query
-            }
-        ],
-        "max_tokens": 1000
-    }
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {PPLX_API_KEY}"
-    }
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        st.error(f"Error querying Perplexity API: {e}")
         return None
 
 def enhance_article_data(article):
@@ -578,16 +283,6 @@ def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries
         
         progress_bar.progress(1.0)
         status_text.empty()
-        
-        return final_articles
-    
-    except Exception as e:
-        st.error(f"Error fetching incidents: {e}")
-        return []
-    
-    finally:
-        progress_bar.empty()
-        status_text.empty()
 
 # Set up page configuration
 st.set_page_config(
@@ -750,3 +445,305 @@ if st.session_state.incidents_fetched and st.session_state.incidents:
         key="download_csv",
         use_container_width=True
     )
+
+# Display incidents
+st.header("Detailed Incidents")
+
+if st.session_state.incidents_fetched:
+    if st.session_state.incidents:
+        for i, incident in enumerate(st.session_state.incidents, 1):
+            st.markdown(format_incident_card(incident, i), unsafe_allow_html=True)
+            
+            # Add expandable details section
+            with st.expander(f"View Details - {incident['title'][:50]}..."):
+                st.subheader("Affected Vendors")
+                if incident.get("vendors") and len(incident["vendors"]) > 0:
+                    st.write(", ".join(incident["vendors"]))
+                else:
+                    st.write("No specific vendors identified")
+                
+                st.subheader("Impact")
+                st.write(incident.get("impact", "No impact information available"))
+                
+                if incident.get("cve_ids") and len(incident["cve_ids"]) > 0:
+                    st.subheader("CVE IDs")
+                    st.write(", ".join(incident["cve_ids"]))
+                
+                if incident.get("mitigation"):
+                    st.subheader("Mitigation")
+                    st.write(incident["mitigation"])
+                
+                st.subheader("Severity Score")
+                severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
+                st.write(f"{severity} (Score: {incident.get('score', 0)})")
+                
+                # Add raw date information for debugging
+                if debug_mode:
+                    st.subheader("Date Information (Debug)")
+                    st.write(f"Raw date string: {incident.get('date', 'N/A')}")
+                    parsed_date = parse_article_date(incident.get('date', ''))
+                    st.write(f"Parsed date: {parsed_date}")
+                    cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
+                    cutoff = cutoff.replace(tzinfo=None)  # Ensure naive datetime
+                    st.write(f"Is newer than cutoff ({cutoff}): {parsed_date >= cutoff if parsed_date else 'Unknown'}")
+    else:
+        st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
+else:
+    st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest cybersecurity information.")
+
+# Display information about the app in the sidebar
+with st.sidebar:
+    st.title("About")
+    st.markdown("""
+    This app fetches and displays recent cybersecurity incidents affecting major vendors.
+    
+    **Features:**
+    - Monitors 25+ cybersecurity news sources
+    - Tracks incidents for 50+ major vendors
+    - Calculates severity scores
+    - Export data to CSV
+    
+    **How it works:**
+    1. Set the number of days to look back
+    2. Click "FETCH CYBERSECURITY INCIDENTS"
+    3. View and analyze the results
+    """)
+    
+    st.markdown("---")
+    st.subheader("Sources")
+    st.markdown("Data is collected from reputable cybersecurity sources including:")
+    sources_list = ["SANS ISC", "CISA", "Bleeping Computer", "Krebs on Security", "Talos Intelligence", "The Hacker News"]
+    for source in sources_list:
+        st.markdown(f"- {source}")
+
+    # Add contact information for cloud deployment
+    st.markdown("---")
+    st.subheader("Contact")
+    st.markdown("For questions or support, please contact: support@example.com")
+        
+        return final_articles
+    
+    except Exception as e:
+        st.error(f"Error fetching incidents: {e}")
+        return []
+    
+    finally:
+        progress_bar.empty()
+        status_text.empty()
+
+# New date parsing function using standard library
+def parse_article_date(date_str):
+    """
+    Parse date strings from various formats to datetime objects.
+    Returns None if parsing fails.
+    """
+    if not date_str or "unknown" in date_str.lower():
+        return None
+    
+    # List of common date formats to try
+    date_formats = [
+        '%Y-%m-%d',                  # 2024-03-19
+        '%Y/%m/%d',                  # 2024/03/19
+        '%d %b %Y',                  # 19 Mar 2024
+        '%d %B %Y',                  # 19 March 2024
+        '%B %d, %Y',                 # March 19, 2024
+        '%b %d, %Y',                 # Mar 19, 2024
+        '%d-%m-%Y',                  # 19-03-2024
+        '%d/%m/%Y',                  # 19/03/2024
+        '%d %b %Y, %H:%M',           # 19 Mar 2024, 14:30
+        '%d %B %Y, %H:%M',           # 19 March 2024, 14:30
+        '%d %b %Y, %I:%M%p',         # 19 Mar 2024, 2:30pm
+        '%d %B %Y, %I:%M%p',         # 19 March 2024, 2:30pm
+        '%Y-%m-%dT%H:%M:%S',         # 2024-03-19T14:30:00 (ISO format)
+        '%Y-%m-%dT%H:%M:%SZ',        # 2024-03-19T14:30:00Z (ISO format with Z)
+        '%a, %d %b %Y %H:%M:%S %z',  # Mon, 19 Mar 2024 14:30:00 +0000 (RFC format)
+        '%b %d, %Y %I:%M %p',        # Mar 19, 2024 2:30 PM
+        '%d %b %Y %H:%M:%S',         # 19 Mar 2024 14:30:00
+        '%a %b %d %H:%M:%S %Y',      # Thu Mar 19 14:30:00 2024
+    ]
+    
+    # Clean the date string a bit
+    date_str = date_str.strip()
+    
+    # Try each format
+    for fmt in date_formats:
+        try:
+            dt = datetime.datetime.strptime(date_str, fmt)
+            # Ensure we're returning a naive datetime
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except ValueError:
+            continue
+    
+    # If we got here, none of the formats worked
+    return None
+
+def extract_articles(html_content, source_url):
+    articles = []
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Look for article tags, divs with article class, or common blog post structures
+        potential_articles = (
+            soup.find_all('article') or 
+            soup.find_all('div', class_=['post', 'entry', 'blog-post', 'news-item']) or
+            soup.select('.post, .article, .blog-item, .news-entry')
+        )
+        
+        # If no structure found, look for headings with links
+        if not potential_articles:
+            potential_articles = soup.select('h1 a, h2 a, h3 a')
+            
+        for article in potential_articles:  # Limit to 10 articles per source
+            title_elem = article.find('h1') or article.find('h2') or article.find('h3') or article.find('a')
+            
+            if title_elem:
+                title = title_elem.text.strip()
+                link = None
+                
+                # Try to find the link
+                if title_elem.name == 'a':
+                    link = title_elem.get('href')
+                else:
+                    link_elem = title_elem.find('a')
+                    if link_elem:
+                        link = link_elem.get('href')
+                
+                # Make relative URLs absolute
+                if link and not link.startswith('http'):
+                    if link.startswith('/'):
+                        base_url = '/'.join(source_url.split('/')[:3])  # Get domain
+                        link = base_url + link
+                    else:
+                        link = source_url + link if source_url.endswith('/') else source_url + '/' + link
+                
+                # Try to find date with more robust selectors
+                date_elem = (
+                    article.find('time') or 
+                    article.select_one('.date, .meta-date, .published, .post-date, .entry-date, .post-meta') or
+                    article.find(attrs={"datetime": True})
+                )
+                
+                # If date element has datetime attribute, use that
+                if date_elem and date_elem.has_attr('datetime'):
+                    date = date_elem['datetime']
+                elif date_elem:
+                    date = date_elem.text.strip()
+                else:
+                    # Look for date pattern in text
+                    date_text = article.text
+                    date_matches = re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b', date_text)
+                    if date_matches:
+                        date = date_matches.group(0)
+                    else:
+                        date = "Unknown date"
+                
+                # Try to find description/summary
+                desc_elem = article.find('p') or article.select_one('.excerpt, .summary, .description')
+                description = desc_elem.text.strip() if desc_elem else ""
+                
+                if title and link:
+                    articles.append({
+                        "title": title,
+                        "link": link,
+                        "date": date,
+                        "description": description[:200] + "..." if len(description) > 200 else description,
+                        "source": source_url,
+                        "source_name": source_url.split('//')[-1].split('/')[0].replace('www.', '')
+                    })
+        
+    except Exception as e:
+        st.error(f"Error extracting articles from {source_url}: {e}")
+    
+    return articles
+
+# Updated process_source function with proper date filtering
+def process_source(source, days_to_look_back):
+    source_url = source["url"]
+    priority = source["priority"]
+    
+    # For SANS ISC diary archive, modify URL to include year and month
+    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
+        current_date = datetime.datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
+    
+    html_content = make_request(source_url)
+    
+    if not html_content:
+        return []
+    
+    articles = extract_articles(html_content, source_url)
+    
+    # Filter articles based on date
+    filtered_articles = []
+    cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_look_back)
+    
+    # Ensure the cutoff date is timezone naive
+    if cutoff_date.tzinfo is not None:
+        cutoff_date = cutoff_date.replace(tzinfo=None)
+    
+    for article in articles:
+        # Parse the date
+        article_date = parse_article_date(article["date"])
+        
+        # If we could parse the date, check if it's newer than cutoff
+        if article_date and article_date >= cutoff_date:
+            filtered_articles.append(article)
+        elif not article_date:
+            # If we couldn't parse the date, include the article but mark it
+            article["date_parsing_failed"] = True
+            filtered_articles.append(article)
+    
+    return filtered_articles
+
+def query_perplexity_api(query):
+    url = "https://api.perplexity.ai/chat/completions"
+    
+    # Skip API call if no API key is provided
+    if not PPLX_API_KEY:
+        return None
+    
+    payload = {
+        "model": "sonar",
+        "messages": [
+            {
+                "role": "system",
+                "content": """You are a cybersecurity expert specializing in finding the latest cybersecurity incidents, 
+                attacks, vulnerabilities, updates, and important security news. Focus on professional, 
+                actionable intelligence and filter out generic weekly summaries or non-specific content. 
+                Include detailed information about incidents, CVEs, patches, product releases, and security measures 
+                when available. Return your analysis in JSON format with the following structure:
+                {
+                    "type": "vulnerability|attack|patch|product_release|security_measure",
+                    "severity": "low|medium|high|critical",
+                    "affected_vendors": ["vendor1", "vendor2"],
+                    "cve_ids": ["CVE-XXXX-XXXX"],
+                    "impact": "Description of the impact",
+                    "iocs": ["indicator1", "indicator2"],
+                    "mitigation": "Steps to mitigate the issue"
+                }
+                """
+            },
+            {
+                "role": "user",
+                "content": query
+            }
+        ],
+        "max_tokens": 1000
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {PPLX_API_KEY}"
+    }
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error querying Perplexity API: {e}")
+        return None
