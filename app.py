@@ -1,629 +1,68 @@
-from bs4 import BeautifulSoup
-from bs4.element import Comment
-import requests
-import csv
-import sys
-import json
-import re
-import os
-import logging
-from datetime import datetime, timedelta
 import streamlit as st
 import pandas as pd
-import base64
-from io import BytesIO
+import requests
+import datetime
+import time
+import json
+import random
+import os
+import re
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
+import threading
+import hashlib
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("cybersec_incidents.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# API configuration - getting from environment variables for cloud security
+PPLX_API_KEY = os.environ.get('PPLX_API_KEY', '')
 
-# Simple sentence tokenizer that doesn't require NLTK
-def simple_sent_tokenize(text):
-    """Simple sentence tokenization fallback."""
-    sentences = []
-    for s in re.split(r'(?<=[.!?])\s+', text):
-        if s:
-            sentences.append(s)
-    return sentences
-
-# Configuration
-OUTPUT_FILE = "top_incidents.json"
-DAYS_AGO = 2  # Default to fetch articles from today and yesterday
-
-# API KEYS - Set your OpenAI API key here
-# API KEYS - Replace with your actual API keys
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-
-# List of top vendors/products to track
-TOP_VENDORS = [
-    "Microsoft", "Azure", "Windows", "Office 365", 
-    "AWS", "Amazon Web Services", "EC2", "S3",
-    "Google", "GCP", "Google Cloud", "Chrome",
-    "Cisco", "IOS", "Webex", "Talos",
-    "Oracle", "Java", "PeopleSoft", "WebLogic",
-    "VMware", "ESXi", "vSphere", "NSX",
-    "Fortinet", "FortiGate", "FortiOS",
-    "Palo Alto", "PAN-OS", "Prisma",
-    "Citrix", "XenApp", "NetScaler",
-    "IBM", "WebSphere", "Db2",
-    "SAP", "HANA", "NetWeaver",
-    "Salesforce", "ServiceNow",
-    "Adobe", "Acrobat", "Reader", "Creative Cloud",
-    "Linux", "Ubuntu", "Red Hat", "RHEL", "CentOS",
-    "Android", "iOS", "macOS",
-    "Juniper", "Junos",
-    "Docker", "Kubernetes", "K8s",
-    "Splunk", "CrowdStrike", "Symantec", "McAfee", "Trend Micro",
-    "F5", "BIG-IP", "Checkpoint", "SonicWall"
+# List of cybersecurity news sources to scrape
+SOURCES = [
+    {"url": "https://www.sans.org/newsletters/at-risk/", "priority": "high"},
+    {"url": "https://isc.sans.edu/diaryarchive.html", "priority": "high"},
+    {"url": "https://us-cert.cisa.gov/ncas", "priority": "high"},
+    {"url": "https://isc.sans.edu/podcast.html", "priority": "high"},
+    {"url": "https://www.bleepingcomputer.com/", "priority": "high"},
+    {"url": "https://securelist.com/", "priority": "high"},
+    {"url": "https://www.trendmicro.com/en_us/research.html", "priority": "high"},
+    {"url": "https://blog.malwarebytes.com/", "priority": "high"},
+    {"url": "https://cofense.com/blog/", "priority": "high"},
+    {"url": "https://www.zdnet.com/", "priority": "medium"},
+    {"url": "https://www.bitdefender.com/blog/", "priority": "medium"},
+    {"url": "https://thehackernews.com/", "priority": "medium"},
+    {"url": "https://krebsonsecurity.com/", "priority": "medium"},
+    {"url": "https://gbhackers.com/", "priority": "medium"},
+    {"url": "https://blog.talosintelligence.com/", "priority": "medium"},
+    {"url": "https://www.crowdstrike.com/blog/", "priority": "medium"},
+    {"url": "https://sysdig.com/blog/", "priority": "medium"},
+    {"url": "https://research.checkpoint.com/latest-publications/", "priority": "medium"},
+    {"url": "https://nakedsecurity.sophos.com/", "priority": "medium"},
+    {"url": "https://unit42.paloaltonetworks.com/", "priority": "medium"},
+    {"url": "https://www.horizon3.ai/feed/", "priority": "medium"},
+    {"url": "https://www.mandiant.com/resources/blog/", "priority": "medium"},
+    {"url": "https://www.sentinelone.com/blog/", "priority": "medium"},
+    {"url": "https://aws.amazon.com/security/security-bulletins/", "priority": "medium"}
 ]
 
-# RSS Feeds
-RSS_FEEDS = [
-    "https://www.sans.org/newsletters/at-risk/",
-    "https://isc.sans.edu/diaryarchive.html",
-    "https://www.zdnet.com/",
-    "https://www.bitdefender.com/blog/",
-    "https://us-cert.cisa.gov/ncas",
-    "https://isc.sans.edu/diaryarchive.html?year=2024&month=10",
-    "https://isc.sans.edu/podcast.html",
-    "https://aws.amazon.com/security/security-bulletins/?card-body.sort-by=item.additiona[…]-order=desc&awsf.bulletins-flag=*all&awsf.bulletins-year=*all",
-    "https://www.bleepingcomputer.com/",
-    "https://securelist.com/",
-    "https://www.trendmicro.com/en_us/research.html",
-    "https://blog.malwarebytes.com/",
-    "https://cofense.com/blog/",
-    "https://thehackernews.com/",
-    "https://krebsonsecurity.com/",
-    "https://gbhackers.com/",
-    "https://blog.talosintelligence.com/",
-    "https://www.crowdstrike.com/blog/",
-    "https://sysdig.com/blog/",
-    "https://research.checkpoint.com/latest-publications/",
-    "https://nakedsecurity.sophos.com/",
-    "https://unit42.paloaltonetworks.com/",
-    "https://www.horizon3.ai/feed/",
-    "https://www.mandiant.com/resources/blog/",
-    "https://www.sentinelone.com/blog/",
-]
-
-# Convert regular website URLs to RSS feed URLs where possible
-RSS_FEED_MAPPINGS = {
-    "https://www.sans.org/newsletters/at-risk/": "https://www.sans.org/newsletters/at-risk/rss/",
-    "https://isc.sans.edu/diaryarchive.html": "https://isc.sans.edu/rssfeed.xml",
-    "https://www.zdnet.com/": "https://www.zdnet.com/news/rss.xml",
-    "https://www.bitdefender.com/blog/": "https://www.bitdefender.com/blog/feed/",
-    "https://us-cert.cisa.gov/ncas": "https://us-cert.cisa.gov/ncas/all.xml",
-    "https://isc.sans.edu/diaryarchive.html?year=2024&month=10": "https://isc.sans.edu/rssfeed.xml",
-    "https://isc.sans.edu/podcast.html": "https://isc.sans.edu/podcast.xml",
-    "https://aws.amazon.com/security/security-bulletins/?card-body.sort-by=item.additiona[…]-order=desc&awsf.bulletins-flag=*all&awsf.bulletins-year=*all": "https://aws.amazon.com/blogs/security/feed/",
-    "https://www.bleepingcomputer.com/": "https://www.bleepingcomputer.com/feed/",
-    "https://securelist.com/": "https://securelist.com/feed/",
-    "https://www.trendmicro.com/en_us/research.html": "https://feeds.feedburner.com/TrendMicroSimplySecurity",
-    "https://blog.malwarebytes.com/": "https://www.malwarebytes.com/blog/feed/index.xml",
-    "https://cofense.com/blog/": "https://cofense.com/blog/feed/",
-    "https://thehackernews.com/": "https://feeds.feedburner.com/TheHackersNews",
-    "https://krebsonsecurity.com/": "https://krebsonsecurity.com/feed/",
-    "https://gbhackers.com/": "https://gbhackers.com/feed/",
-    "https://blog.talosintelligence.com/": "https://blog.talosintelligence.com/rss/",
-    "https://www.crowdstrike.com/blog/": "https://www.crowdstrike.com/blog/feed/",
-    "https://sysdig.com/blog/": "https://sysdig.com/blog/feed/",
-    "https://research.checkpoint.com/latest-publications/": "https://research.checkpoint.com/feed/",
-    "https://nakedsecurity.sophos.com/": "https://nakedsecurity.sophos.com/feed/",
-    "https://unit42.paloaltonetworks.com/": "https://unit42.paloaltonetworks.com/feed/",
-    "https://www.horizon3.ai/feed/": "https://www.horizon3.ai/feed/",
-    "https://www.mandiant.com/resources/blog/": "https://www.mandiant.com/resources/blog/rss.xml",
-    "https://www.sentinelone.com/blog/": "https://www.sentinelone.com/blog/feed/",
+# Headers to mimic a browser request
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
 }
-
-def tag_visible(element):
-    """Filter out invisible elements from HTML."""
-    if element.parent.name in ['style', 'script', 'head', 'title', 'meta', '[document]']:
-        return False
-    if isinstance(element, Comment):
-        return False
-    try:
-        if True in [value in ["related-articles"] for value in element.parent.attrs.values()]:
-            return False
-    except KeyError:
-        pass
-    return True
-
-def is_recent_date(date_str, days_ago):
-    """
-    Improved date checking function that strictly checks if a date is within the specified timeframe.
-    """
-    try:
-        # Current date at midnight
-        now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        cutoff_date = now - timedelta(days=days_ago)
-        
-        # Try standard RSS date format first
-        standard_formats = [
-            "%a, %d %b %Y %H:%M:%S %z",  # Wed, 18 Mar 2025 10:30:00 +0000
-            "%a, %d %b %Y %H:%M:%S %Z",  # Wed, 18 Mar 2025 10:30:00 GMT
-            "%Y-%m-%d %H:%M:%S",         # 2025-03-18 10:30:00
-            "%Y-%m-%d",                  # 2025-03-18
-            "%d %b %Y %H:%M:%S",         # 18 Mar 2025 10:30:00
-            "%d %b %Y",                  # 18 Mar 2025
-            "%b %d, %Y",                 # Mar 18, 2025
-        ]
-        
-        # Try each format
-        for fmt in standard_formats:
-            try:
-                date_obj = datetime.strptime(date_str, fmt)
-                return date_obj >= cutoff_date
-            except ValueError:
-                continue
-        
-        # Extract year, month, day from the string
-        year_match = re.search(r'(?:19|20)\d{2}', date_str)  # Match years 1900-2099
-        
-        if not year_match:
-            logger.warning(f"No year found in date string: {date_str}")
-            return False
-        
-        year = year_match.group(0)
-        
-        # Find month
-        month_patterns = {
-            'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
-            'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-        }
-        
-        month = None
-        for month_name, month_num in month_patterns.items():
-            if month_name in date_str:
-                month = month_num
-                break
-        
-        if not month:
-            logger.warning(f"No month found in date string: {date_str}")
-            return False
-        
-        # Find day
-        day_match = re.search(r'\b(\d{1,2})\b', date_str)
-        if not day_match:
-            logger.warning(f"No day found in date string: {date_str}")
-            return False
-        
-        day = day_match.group(0).zfill(2)  # Pad single digits with leading zero
-        
-        # Construct date and compare
-        try:
-            constructed_date = datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d")
-            return constructed_date >= cutoff_date
-        except ValueError:
-            logger.warning(f"Failed to construct date from {year}-{month}-{day}")
-            return False
-    
-    except Exception as e:
-        logger.error(f"Error checking date recency: {e} for date: {date_str}")
-        return False
-
-def extract_text_from_html(html_content):
-    """Extract readable text from HTML content."""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    texts = soup.findAll(string=True)  # Use string= instead of text= to avoid deprecation warning
-    visible_texts = filter(tag_visible, texts)
-    return ' '.join(t.strip() for t in visible_texts if t.strip())
-
-def identify_vendors(text):
-    """Identify mentioned vendors in the text."""
-    found_vendors = []
-    for vendor in TOP_VENDORS:
-        pattern = r'\b' + re.escape(vendor) + r'\b'
-        if re.search(pattern, text, re.IGNORECASE):
-            found_vendors.append(vendor)
-    return list(set(found_vendors))
-
-def extract_impact(text, vendor_names):
-    """Extract sentences mentioning impact and vulnerabilities."""
-    impact_keywords = [
-        "vulnerability", "exploit", "attack", "breach", "compromise", 
-        "malware", "ransomware", "phishing", "data leak", "zero-day",
-        "CVE", "patch", "security flaw", "backdoor", "threat", "risk",
-        "critical", "high severity", "remote code execution", "RCE",
-        "privilege escalation", "denial of service", "DoS", "data exposure"
-    ]
-    
-    # Use our simple sentence tokenizer
-    sentences = simple_sent_tokenize(text)
-    impact_sentences = []
-    
-    for sentence in sentences:
-        if any(vendor.lower() in sentence.lower() for vendor in vendor_names):
-            if any(keyword.lower() in sentence.lower() for keyword in impact_keywords):
-                impact_sentences.append(sentence)
-    
-    # Limit to 3 sentences at most
-    summary = " ".join(impact_sentences[:3])
-    if not summary:
-        # If no specific impact sentences found, return general context
-        for sentence in sentences:
-            if any(keyword.lower() in sentence.lower() for keyword in impact_keywords):
-                impact_sentences.append(sentence)
-        summary = " ".join(impact_sentences[:3])
-    
-    return summary if summary else "Impact details not specified."
-
-def create_incident_summary(title, link, vendors, impact, pub_date, source):
-    """Create a structured summary of the incident."""
-    return {
-        "title": title,
-        "link": link,
-        "vendors": vendors,
-        "impact": impact,
-        "publication_date": pub_date,
-        "source": source,
-        "score": calculate_severity_score(impact) * len(vendors)  # Higher score for multiple vendors and severe impacts
-    }
-
-def calculate_severity_score(impact_text):
-    """Calculate a severity score based on the impact description."""
-    severity_terms = {
-        "critical": 5,
-        "high": 4,
-        "remote code execution": 5,
-        "privilege escalation": 4,
-        "zero-day": 5,
-        "ransomware": 5,
-        "data breach": 4,
-        "backdoor": 4,
-        "exploit": 3,
-        "vulnerability": 3,
-        "patch": 2,
-        "update": 1
-    }
-    
-    score = 1  # Base score
-    for term, value in severity_terms.items():
-        if term.lower() in impact_text.lower():
-            score += value
-    
-    return score
-
-def get_cybersecurity_incidents_openai(api_key, top_vendors, days):
-    """
-    Fetch top cybersecurity incidents using OpenAI API.
-    
-    Args:
-        api_key (str): OpenAI API key
-        top_vendors (list): List of vendors to track
-        days (int): Number of days to look back
-        
-    Returns:
-        list: List of incident dictionaries
-    """
-    # Skip if no API key provided
-    if not api_key or api_key == "your-openai-api-key-here":
-        logger.warning("No valid OpenAI API key provided")
-        return []
-        
-    # Format the vendors list for the prompt
-    vendors_text = ", ".join(top_vendors[:20])  # Limit to 20 vendors to keep prompt size reasonable
-    
-    # Create the system prompt with emphasis on recency
-    system_prompt = f"""You are a cybersecurity expert tasked with identifying important cybersecurity incidents 
-    from the past {days} days. Focus on incidents involving these vendors: {vendors_text}.
-    Pay special attention to vulnerabilities, exploits, attacks, breaches, malware, and ransomware.
-    IMPORTANT: Only include incidents that have been published or reported in the last {days} days. Do not include older incidents.
-    """
-    
-    # Create the user prompt
-    user_prompt = f"""Search for cybersecurity incidents from sources like:
-    - sans.org
-    - cisa.gov
-    - bleepingcomputer.com
-    - thehackernews.com
-    - krebsonsecurity.com
-    - talosintelligence.com
-    - trendmicro.com
-    - unit42.paloaltonetworks.com
-
-    For each incident, provide:
-    1. A clear title describing the incident
-    2. A list of affected vendors
-    3. A 2-line summary of the impact
-    4. The source URL
-    5. The exact publication date in format "YYYY-MM-DD"
-    
-    Return exactly 5 incidents, prioritizing severity and recency. If fewer than 5 recent incidents exist within the past {days} days, return only those that are truly recent.
-    Format as a JSON object with an "incidents" field containing an array of incidents, each with fields: title, vendors, impact, source, and date.
-    """
-    
-    # Call OpenAI API
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "gpt-4o-mini",  # You can use gpt-3.5-turbo for lower cost
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.2  # Lower temperature for more deterministic results
-    }
-    
-    try:
-        logger.info("Making request to OpenAI API")
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=60  # 60 second timeout
-        )
-        
-        response.raise_for_status()  # Raise an exception for HTTP errors
-        result = response.json()
-        
-        # Parse the JSON content from the response
-        content = result['choices'][0]['message']['content']
-        incidents_data = json.loads(content)
-        
-        # Format the response to match your desired output format
-        formatted_incidents = []
-        
-        # Check if the incidents data contains an 'incidents' field
-        incidents = incidents_data.get('incidents', [])
-        if not incidents and isinstance(incidents_data, list):
-            # Handle case where API returns a direct array
-            incidents = incidents_data
-            
-        logger.info(f"Received {len(incidents)} incidents from OpenAI API")
-        
-        for incident in incidents:
-            # Extract vendors as a list if it's a string
-            vendors = incident.get("vendors", [])
-            if isinstance(vendors, str):
-                vendors = [v.strip() for v in vendors.split(',')]
-                
-            # Use the date provided by the API, or today's date if not available
-            pub_date = incident.get("date", datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000"))
-            
-            formatted_incidents.append({
-                "title": incident.get("title", ""),
-                "vendors": vendors,
-                "impact": incident.get("impact", ""),
-                "publication_date": pub_date,
-                "source": incident.get("source", "").split('/')[2] if '/' in incident.get("source", "") else incident.get("source", ""),
-                "link": incident.get("source", ""),
-                "score": calculate_severity_score(incident.get("impact", "")) * max(len(vendors), 1)
-            })
-        
-        return formatted_incidents
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error making request to OpenAI API: {e}")
-        return []
-    except (KeyError, json.JSONDecodeError) as e:
-        logger.error(f"Error parsing response from OpenAI API: {e}")
-        return []
-
-class ReadRss:
-    """Class for reading RSS feeds."""
-    def __init__(self, rss_url, headers):
-        self.url = rss_url
-        self.headers = headers
-        try:
-            # Try to convert to RSS feed URL if available
-            feed_url = RSS_FEED_MAPPINGS.get(rss_url, rss_url)
-            self.r = requests.get(feed_url, headers=self.headers, timeout=30)
-            self.status_code = self.r.status_code
-        except Exception as e:
-            print('Error fetching the URL: ', rss_url)
-            print(e)
-            raise
-        try:    
-            self.soup = BeautifulSoup(self.r.text, 'html.parser')
-        except Exception as e:
-            print('Could not parse the xml: ', self.url)
-            print(e)
-            raise
-        
-        # Handle cases where items might be differently structured
-        self.articles = self.soup.findAll('item')
-        
-        # More robust extraction
-        self.articles_dicts = []
-        for a in self.articles:
-            article_dict = {}
-            
-            # Title
-            title_tag = a.find('title')
-            if title_tag:
-                article_dict['title'] = title_tag.text
-            
-            # Link - handle different link formats
-            link_tag = a.find('link')
-            if link_tag:
-                if link_tag.next_sibling and isinstance(link_tag.next_sibling, str):
-                    article_dict['link'] = link_tag.next_sibling.replace('\n','').replace('\t','')
-                else:
-                    article_dict['link'] = link_tag.text or link_tag.string or ""
-            
-            # Description
-            desc_tag = a.find('description')
-            if desc_tag:
-                article_dict['description'] = desc_tag.text
-            
-            # Publication date - handle variations
-            date_tag = a.find('pubdate') or a.find('pubDate')
-            if date_tag:
-                article_dict['pubdate'] = date_tag.text
-            
-            # Only add articles with required fields
-            if 'title' in article_dict and 'link' in article_dict:
-                self.articles_dicts.append(article_dict)
-        
-        # Extract lists for backwards compatibility
-        self.urls = [d['link'] for d in self.articles_dicts if 'link' in d]
-        self.titles = [d['title'] for d in self.articles_dicts if 'title' in d]
-        self.descriptions = [d['description'] for d in self.articles_dicts if 'description' in d]
-        self.pub_dates = [d['pubdate'] for d in self.articles_dicts if 'pubdate' in d]
-
-def fetch_and_process_feeds(days_ago):
-    """Fetch articles from RSS feeds and process them."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/110.0'
-    }
-    
-    incidents = []
-    logger.info(f"Starting to fetch articles from the past {days_ago} day(s)")
-    
-    for feed_url in RSS_FEEDS:
-        try:
-            logger.info(f"Processing feed: {feed_url}")
-            item = ReadRss(feed_url, headers)
-            
-            source_name = feed_url.split('/')[2]
-            
-            for article in item.articles_dicts:
-                try:
-                    title = article['title']
-                    link = article['link']
-                    
-                    # Handle cases where pubdate might be missing
-                    pub_date = article.get('pubdate', "Unknown date")
-                    
-                    # Check if article is recent using the improved date checker
-                    if not is_recent_date(pub_date, days_ago):
-                        logger.info(f"Skipping article, not recent enough: {title[:50]}... ({pub_date})")
-                        continue
-                    
-                    # Safely log title with encoding handling
-                    safe_title = title.encode('ascii', 'ignore').decode('ascii')
-                    logger.info(f"Found recent article: {safe_title}")
-                    
-                    # Fetch the full article
-                    article_response = requests.get(link.strip(), headers=headers, timeout=30)
-                    article_text = extract_text_from_html(article_response.text)
-                    
-                    # Identify vendors
-                    found_vendors = identify_vendors(title + " " + article_text)
-                    
-                    # Only process articles mentioning tracked vendors
-                    if found_vendors:
-                        logger.info(f"Article mentions vendors: {', '.join(found_vendors)}")
-                        impact = extract_impact(article_text, found_vendors)
-                        
-                        incident = create_incident_summary(
-                            title=title,
-                            link=link,
-                            vendors=found_vendors,
-                            impact=impact,
-                            pub_date=pub_date,
-                            source=source_name
-                        )
-                        
-                        incidents.append(incident)
-                        logger.info(f"Added incident: {title[:50]}... (from {pub_date})")
-                
-                except Exception as e:
-                    logger.error(f"Error processing article: {str(e)}")
-                    continue
-        
-        except Exception as e:
-            logger.error(f"Error processing feed {feed_url}: {str(e)}")
-            continue
-    
-    logger.info(f"Found {len(incidents)} relevant incidents from RSS feeds")
-    return incidents
-
-def format_report(incidents):
-    """Format incidents for a readable report."""
-    if not incidents:
-        return "No significant cybersecurity incidents found."
-    
-    message = "TOP CYBERSECURITY INCIDENTS\n\n"
-    
-    for i, incident in enumerate(incidents, 1):
-        vendors_text = ", ".join(incident["vendors"])
-        
-        message += f"{i}. {incident['title']}\n"
-        message += f"Source: {incident['source']}\n"
-        message += f"Link: {incident['link']}\n"
-        message += f"Publication Date: {incident['publication_date']}\n\n"
-    
-    message += "Security analysts should review these incidents before final publication to customers."
-    return message
-
-def save_incidents(incidents):
-    """Save incidents to a JSON file."""
-    with open(OUTPUT_FILE, 'w') as f:
-        json.dump(incidents, f, indent=2)
-    logger.info(f"Saved incidents to {OUTPUT_FILE}")
-
-def fetch_cybersecurity_incidents(days_ago):
-    """Main function to fetch cybersecurity incidents."""
-    logger.info("Starting cybersecurity incidents report")
-    
-    all_incidents = []
-    
-    # Try OpenAI API first
-    if OPENAI_API_KEY and OPENAI_API_KEY != "your-openai-api-key-here":
-        logger.info("Using OpenAI API to fetch incidents")
-        try:
-            openai_incidents = get_cybersecurity_incidents_openai(OPENAI_API_KEY, TOP_VENDORS, days_ago)
-            all_incidents.extend(openai_incidents)
-            logger.info(f"Found {len(openai_incidents)} incidents via OpenAI API")
-        except Exception as e:
-            logger.error(f"Error using OpenAI API: {str(e)}")
-    else:
-        logger.info("No OpenAI API key provided, skipping OpenAI API")
-    
-    # Always process RSS feeds as backup or supplement
-    try:
-        rss_incidents = fetch_and_process_feeds(days_ago)
-        all_incidents.extend(rss_incidents)
-        logger.info(f"Found {len(rss_incidents)} incidents from RSS feeds")
-    except Exception as e:
-        logger.error(f"Error processing RSS feeds: {str(e)}")
-    
-    # Filter out incidents that are older than the specified timeframe
-    recent_incidents = []
-    for incident in all_incidents:
-        pub_date = incident.get("publication_date", "")
-        if is_recent_date(pub_date, days_ago):
-            recent_incidents.append(incident)
-        else:
-            logger.info(f"Filtering out old incident: {incident['title'][:50]}... ({pub_date})")
-    
-    logger.info(f"After date filtering: {len(recent_incidents)} recent incidents")
-    
-    # Sort by score and select top 5
-    if recent_incidents:
-        incidents = sorted(recent_incidents, key=lambda x: x["score"], reverse=True)[:5]
-        save_incidents(incidents)
-        logger.info("Cybersecurity incidents report completed")
-        return incidents
-    else:
-        logger.warning("No recent incidents found")
-        return []
-
-#---------------------------
-# Streamlit UI Functions
-#---------------------------
 
 def format_incident_card(incident, idx):
     """Format a single incident as an HTML card."""
-    severity_class = "high-severity" if incident.get("score", 0) > 15 else "medium-severity" if incident.get("score", 0) > 8 else "low-severity"
+    severity_class = "high-severity" if incident.get("severity_score", 0) > 80 else "medium-severity" if incident.get("severity_score", 0) > 50 else "low-severity"
     
     html = f"""
     <div class="incident-card {severity_class}">
         <div class="incident-header">{idx}. {incident['title']}</div>
         <div class="incident-meta">
-            Source: {incident['source']} | Published: {incident.get('publication_date', 'N/A')}
+            Source: {incident.get('source_name', 'Unknown Source')} | Published: {incident.get('date', 'N/A')}
         </div>
         <div style="margin-top: 15px;">
             <a href="{incident['link']}" target="_blank" class="incident-link">
@@ -633,6 +72,343 @@ def format_incident_card(incident, idx):
     </div>
     """
     return html
+
+# Utility functions
+def get_current_date():
+    return datetime.datetime.now().strftime("%Y-%m-%d")
+
+def get_date_n_days_back(n):
+    past_date = datetime.datetime.now() - datetime.timedelta(days=n)
+    return past_date.strftime("%Y-%m-%d")
+
+def make_request(url):
+    try:
+        time.sleep(random.uniform(1, 3))  # Random delay between 1-3 seconds
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        st.error(f"Error fetching {url}: {e}")
+        return None
+
+def extract_articles(html_content, source_url):
+    articles = []
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Look for article tags, divs with article class, or common blog post structures
+        potential_articles = (
+            soup.find_all('article') or 
+            soup.find_all('div', class_=['post', 'entry', 'blog-post', 'news-item']) or
+            soup.select('.post, .article, .blog-item, .news-entry')
+        )
+        
+        # If no structure found, look for headings with links
+        if not potential_articles:
+            potential_articles = soup.select('h1 a, h2 a, h3 a')
+            
+        for article in potential_articles[:10]:  # Limit to 10 articles per source
+            title_elem = article.find('h1') or article.find('h2') or article.find('h3') or article.find('a')
+            
+            if title_elem:
+                title = title_elem.text.strip()
+                link = None
+                
+                # Try to find the link
+                if title_elem.name == 'a':
+                    link = title_elem.get('href')
+                else:
+                    link_elem = title_elem.find('a')
+                    if link_elem:
+                        link = link_elem.get('href')
+                
+                # Make relative URLs absolute
+                if link and not link.startswith('http'):
+                    if link.startswith('/'):
+                        base_url = '/'.join(source_url.split('/')[:3])  # Get domain
+                        link = base_url + link
+                    else:
+                        link = source_url + link if source_url.endswith('/') else source_url + '/' + link
+                
+                # Try to find date
+                date_elem = article.find('time') or article.select_one('.date, .meta-date, .published, .post-date')
+                date = date_elem.text.strip() if date_elem else "Unknown date"
+                
+                # Try to find description/summary
+                desc_elem = article.find('p') or article.select_one('.excerpt, .summary, .description')
+                description = desc_elem.text.strip() if desc_elem else ""
+                
+                if title and link:
+                    articles.append({
+                        "title": title,
+                        "link": link,
+                        "date": date,
+                        "description": description[:200] + "..." if len(description) > 200 else description,
+                        "source": source_url,
+                        "source_name": source_url.split('//')[-1].split('/')[0].replace('www.', '')
+                    })
+        
+    except Exception as e:
+        st.error(f"Error extracting articles from {source_url}: {e}")
+    
+    return articles
+
+def query_perplexity_api(query):
+    url = "https://api.perplexity.ai/chat/completions"
+    
+    # Skip API call if no API key is provided
+    if not PPLX_API_KEY:
+        return None
+    
+    payload = {
+        "model": "sonar",
+        "messages": [
+            {
+                "role": "system",
+                "content": """You are a cybersecurity expert specializing in finding the latest cybersecurity incidents, 
+                attacks, vulnerabilities, updates, and important security news. Focus on professional, 
+                actionable intelligence and filter out generic weekly summaries or non-specific content. 
+                Include detailed information about incidents, CVEs, patches, product releases, and security measures 
+                when available. Return your analysis in JSON format with the following structure:
+                {
+                    "type": "vulnerability|attack|patch|product_release|security_measure",
+                    "severity": "low|medium|high|critical",
+                    "affected_vendors": ["vendor1", "vendor2"],
+                    "cve_ids": ["CVE-XXXX-XXXX"],
+                    "impact": "Description of the impact",
+                    "iocs": ["indicator1", "indicator2"],
+                    "mitigation": "Steps to mitigate the issue"
+                }
+                """
+            },
+            {
+                "role": "user",
+                "content": query
+            }
+        ],
+        "max_tokens": 1000
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {PPLX_API_KEY}"
+    }
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Error querying Perplexity API: {e}")
+        return None
+
+def process_source(source, days_to_look_back):
+    source_url = source["url"]
+    priority = source["priority"]
+    
+    # For SANS ISC diary archive, modify URL to include year and month
+    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
+        current_date = datetime.datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
+    
+    html_content = make_request(source_url)
+    
+    if not html_content:
+        return []
+    
+    articles = extract_articles(html_content, source_url)
+    
+    # Filter articles based on date if possible
+    filtered_articles = []
+    cutoff_date = get_date_n_days_back(days_to_look_back)
+    
+    for article in articles:
+        # Try to parse the date - this is tricky as date formats vary widely
+        try:
+            # This is a simple approach - in a production system you'd want more robust date parsing
+            if "unknown" not in article["date"].lower():
+                article_date = article["date"]
+                # Keep the article if we can't determine its date or if it's after our cutoff
+                filtered_articles.append(article)
+        except:
+            # If date parsing fails, include the article anyway
+            filtered_articles.append(article)
+    
+    return filtered_articles
+
+def enhance_article_data(article):
+    query = f"Analyze this cybersecurity news: {article['title']}. If available from the title or description, extract: incident type, affected vendors, CVE numbers, severity, impact, and mitigation steps."
+    
+    enhanced_data = query_perplexity_api(query)
+    
+    if enhanced_data and "choices" in enhanced_data and enhanced_data["choices"]:
+        try:
+            content = enhanced_data["choices"][0]["message"]["content"]
+            # Try to parse as JSON
+            try:
+                structured_data = json.loads(content)
+                article.update({
+                    "type": structured_data.get("type", "unknown"),
+                    "severity": structured_data.get("severity", "medium"),
+                    "affected_vendors": structured_data.get("affected_vendors", []),
+                    "cve_ids": structured_data.get("cve_ids", []),
+                    "impact": structured_data.get("impact", ""),
+                    "iocs": structured_data.get("iocs", []),
+                    "mitigation": structured_data.get("mitigation", "")
+                })
+                
+                # Calculate severity score (0-100)
+                severity_map = {
+                    "low": 30,
+                    "medium": 50,
+                    "high": 80,
+                    "critical": 95
+                }
+                article["severity_score"] = severity_map.get(structured_data.get("severity", "medium"), 50)
+                
+            except json.JSONDecodeError:
+                # If not valid JSON, try to extract key information using keywords
+                article["type"] = "unknown"
+                article["severity"] = "medium"
+                article["severity_score"] = 50
+                
+                # Check for vendors
+                vendors = []
+                common_vendors = ["Microsoft", "Cisco", "Oracle", "Google", "Apple", "Amazon", "IBM", 
+                                 "Adobe", "VMware", "SAP", "Fortinet", "Palo Alto", "Juniper", "F5", 
+                                 "Citrix", "Red Hat", "Ubuntu", "Linux", "Android", "Windows"]
+                for vendor in common_vendors:
+                    if vendor.lower() in content.lower():
+                        vendors.append(vendor)
+                article["affected_vendors"] = vendors
+                
+                # Check for CVEs
+                cves = re.findall(r'CVE-\d{4}-\d{4,7}', content)
+                article["cve_ids"] = cves
+                
+                # Extract possible impact
+                impact_sentences = re.findall(r'([^.]*impact[^.]*\.)', content, re.IGNORECASE)
+                article["impact"] = ' '.join(impact_sentences) if impact_sentences else ""
+                
+        except Exception as e:
+            st.error(f"Error processing enhanced data for article '{article['title']}': {e}")
+    
+    # Generate a unique ID for the incident
+    article["id"] = hashlib.md5(f"{article['title']}:{article['link']}".encode()).hexdigest()
+    
+    # If vendors weren't found previously, try to extract from title/description
+    if not article.get("affected_vendors"):
+        article["affected_vendors"] = extract_vendors_from_text(f"{article['title']} {article.get('description', '')}")
+    
+    # For compatibility with provided template
+    article["vendors"] = article.get("affected_vendors", [])
+    article["score"] = article.get("severity_score", 0)
+    if not article.get("impact"):
+        article["impact"] = "No specific impact information available"
+    
+    return article
+
+def extract_vendors_from_text(text):
+    common_vendors = ["Microsoft", "Cisco", "Oracle", "Google", "Apple", "Amazon", "IBM", 
+                     "Adobe", "VMware", "SAP", "Fortinet", "Palo Alto", "Juniper", "F5", 
+                     "Citrix", "Red Hat", "Ubuntu", "Linux", "Android", "Windows", "CrowdStrike",
+                     "Kaspersky", "Symantec", "McAfee", "ESET", "Trend Micro", "SentinelOne",
+                     "Sophos", "CheckPoint", "Bitdefender", "Avast", "AVG", "Norton", "Malwarebytes"]
+    
+    found_vendors = []
+    for vendor in common_vendors:
+        if vendor.lower() in text.lower():
+            found_vendors.append(vendor)
+    
+    return found_vendors
+
+def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries=5):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        status_text.text(f"Fetching cybersecurity incidents from the past {days_to_look_back} days...")
+        
+        all_articles = []
+        
+        # Process high priority sources first
+        high_priority_sources = [s for s in SOURCES if s["priority"] == "high"]
+        medium_priority_sources = [s for s in SOURCES if s["priority"] == "medium"]
+        
+        total_sources = len(high_priority_sources) + len(medium_priority_sources)
+        processed_sources = 0
+        
+        # Process high priority sources
+        for source in high_priority_sources:
+            status_text.text(f"Fetching from {source['url']}...")
+            articles = process_source(source, days_to_look_back)
+            all_articles.extend(articles)
+            processed_sources += 1
+            progress_bar.progress(processed_sources / total_sources)
+        
+        # If we don't have enough articles, process medium priority sources too
+        if len(all_articles) < min_entries * 2:  # Get more than we need for filtering
+            for source in medium_priority_sources:
+                status_text.text(f"Fetching from {source['url']}...")
+                articles = process_source(source, days_to_look_back)
+                all_articles.extend(articles)
+                processed_sources += 1
+                progress_bar.progress(processed_sources / total_sources)
+        
+        # Remove duplicates (based on title similarity)
+        unique_articles = []
+        seen_titles = set()
+        
+        for article in all_articles:
+            title_normalized = article["title"].lower()
+            # Check if we've seen a very similar title
+            if not any(title_normalized in seen_title or seen_title in title_normalized for seen_title in seen_titles):
+                seen_titles.add(title_normalized)
+                unique_articles.append(article)
+        
+        status_text.text(f"Found {len(unique_articles)} unique articles")
+        
+        # If using API, enhance top articles with Perplexity API
+        enhanced_articles = []
+        
+        if use_api and PPLX_API_KEY:
+            # Sort by priority and limit to manage API usage
+            articles_to_enhance = unique_articles[:min(15, len(unique_articles))]
+            
+            status_text.text(f"Enhancing {len(articles_to_enhance)} articles with Perplexity API...")
+            
+            for i, article in enumerate(articles_to_enhance):
+                status_text.text(f"Enhancing article {i+1} of {len(articles_to_enhance)}...")
+                enhanced_article = enhance_article_data(article)
+                enhanced_articles.append(enhanced_article)
+                progress_bar.progress((processed_sources + i/len(articles_to_enhance)) / (total_sources + 1))
+        elif use_api and not PPLX_API_KEY:
+            st.warning("Perplexity API key not provided. Using basic article extraction without enhancement.")
+        
+        # If we didn't enhance any articles, use the original ones
+        final_articles = enhanced_articles if enhanced_articles else unique_articles
+        
+        # Ensure we have at least min_entries entries
+        if len(final_articles) < min_entries:
+            status_text.text(f"Warning: Only found {len(final_articles)} entries, which is less than the requested minimum of {min_entries}")
+        
+        # Sort by severity score (if available) or just by recency
+        final_articles.sort(key=lambda x: x.get("severity_score", 0), reverse=True)
+        
+        progress_bar.progress(1.0)
+        status_text.empty()
+        
+        return final_articles
+    
+    except Exception as e:
+        st.error(f"Error fetching incidents: {e}")
+        return []
+    
+    finally:
+        progress_bar.empty()
+        status_text.empty()
 
 # Set up page configuration
 st.set_page_config(
@@ -703,18 +479,17 @@ if 'incidents_fetched' not in st.session_state:
 days_ago = st.slider("Number of days to look back:", min_value=1, max_value=30, value=2, key="days_slider", 
                     help="Select how many days in the past to search for incidents")
 
-# OpenAI API Key input - for Streamlit Cloud, use st.secrets instead
-api_key_placeholder = "Using API key from Streamlit secrets" if OPENAI_API_KEY else "No API key configured"
-use_openai = st.checkbox("Use OpenAI API for enhanced results", value=bool(OPENAI_API_KEY), 
-                        help="When enabled, uses OpenAI API to fetch additional cybersecurity incidents")
+# Perplexity API option
+use_perplexity = st.checkbox("Use Perplexity API for enhanced results", value=bool(PPLX_API_KEY), 
+                           help="When enabled, uses Perplexity API to fetch additional cybersecurity incident details")
 
-if not OPENAI_API_KEY and use_openai:
-    st.warning("⚠️ OpenAI API key not configured in secrets. RSS feeds will be used instead.")
+if not PPLX_API_KEY and use_perplexity:
+    st.warning("⚠️ Perplexity API key not configured. Set the PPLX_API_KEY environment variable for enhanced results.")
 
 # Single button for fetching incidents
 if st.button("FETCH CYBERSECURITY INCIDENTS", key="fetch_button", use_container_width=True):
     with st.spinner(f"Fetching cybersecurity incidents from the past {days_ago} days..."):
-        incidents = fetch_cybersecurity_incidents(days_ago)
+        incidents = fetch_cybersecurity_incidents(days_ago, use_perplexity)
         if incidents:
             st.session_state.incidents = incidents
             st.session_state.incidents_fetched = True
@@ -747,13 +522,24 @@ if st.session_state.incidents_fetched:
             # Add expandable details section
             with st.expander(f"View Details - {incident['title'][:50]}..."):
                 st.subheader("Affected Vendors")
-                st.write(", ".join(incident["vendors"]))
+                if incident.get("vendors") and len(incident["vendors"]) > 0:
+                    st.write(", ".join(incident["vendors"]))
+                else:
+                    st.write("No specific vendors identified")
                 
                 st.subheader("Impact")
-                st.write(incident["impact"])
+                st.write(incident.get("impact", "No impact information available"))
+                
+                if incident.get("cve_ids") and len(incident["cve_ids"]) > 0:
+                    st.subheader("CVE IDs")
+                    st.write(", ".join(incident["cve_ids"]))
+                
+                if incident.get("mitigation"):
+                    st.subheader("Mitigation")
+                    st.write(incident["mitigation"])
                 
                 st.subheader("Severity Score")
-                severity = "High" if incident.get("score", 0) > 15 else "Medium" if incident.get("score", 0) > 8 else "Low"
+                severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
                 st.write(f"{severity} (Score: {incident.get('score', 0)})")
     else:
         st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
@@ -784,3 +570,8 @@ with st.sidebar:
     sources_list = ["SANS ISC", "CISA", "Bleeping Computer", "Krebs on Security", "Talos Intelligence", "The Hacker News"]
     for source in sources_list:
         st.markdown(f"- {source}")
+
+    # Add contact information for cloud deployment
+    st.markdown("---")
+    st.subheader("Contact")
+    st.markdown("For questions or support, please contact: support@example.com")
