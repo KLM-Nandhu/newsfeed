@@ -12,7 +12,9 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 import threading
 import hashlib
-import dateparser  # Added for better date parsing
+
+# Do not import dateparser to avoid dependency issues
+# Using standard library datetime instead
 
 # API configuration - getting from environment variables for cloud security
 PPLX_API_KEY = os.environ.get('PPLX_API_KEY', '')
@@ -97,7 +99,7 @@ def make_request(url):
         st.error(f"Error fetching {url}: {e}")
         return None
 
-# New date parsing function
+# New date parsing function using standard library
 def parse_article_date(date_str):
     """
     Parse date strings from various formats to datetime objects.
@@ -106,12 +108,44 @@ def parse_article_date(date_str):
     if not date_str or "unknown" in date_str.lower():
         return None
     
-    try:
-        # Try to parse with dateparser which handles many formats
-        dt = dateparser.parse(date_str)
-        return dt
-    except:
-        return None
+    # List of common date formats to try
+    date_formats = [
+        '%Y-%m-%d',                  # 2024-03-19
+        '%Y/%m/%d',                  # 2024/03/19
+        '%d %b %Y',                  # 19 Mar 2024
+        '%d %B %Y',                  # 19 March 2024
+        '%B %d, %Y',                 # March 19, 2024
+        '%b %d, %Y',                 # Mar 19, 2024
+        '%d-%m-%Y',                  # 19-03-2024
+        '%d/%m/%Y',                  # 19/03/2024
+        '%d %b %Y, %H:%M',           # 19 Mar 2024, 14:30
+        '%d %B %Y, %H:%M',           # 19 March 2024, 14:30
+        '%d %b %Y, %I:%M%p',         # 19 Mar 2024, 2:30pm
+        '%d %B %Y, %I:%M%p',         # 19 March 2024, 2:30pm
+        '%Y-%m-%dT%H:%M:%S',         # 2024-03-19T14:30:00 (ISO format)
+        '%Y-%m-%dT%H:%M:%SZ',        # 2024-03-19T14:30:00Z (ISO format with Z)
+        '%a, %d %b %Y %H:%M:%S %z',  # Mon, 19 Mar 2024 14:30:00 +0000 (RFC format)
+        '%b %d, %Y %I:%M %p',        # Mar 19, 2024 2:30 PM
+        '%d %b %Y %H:%M:%S',         # 19 Mar 2024 14:30:00
+        '%a %b %d %H:%M:%S %Y',      # Thu Mar 19 14:30:00 2024
+    ]
+    
+    # Clean the date string a bit
+    date_str = date_str.strip()
+    
+    # Try each format
+    for fmt in date_formats:
+        try:
+            dt = datetime.datetime.strptime(date_str, fmt)
+            # Ensure we're returning a naive datetime
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except ValueError:
+            continue
+    
+    # If we got here, none of the formats worked
+    return None
 
 def extract_articles(html_content, source_url):
     articles = []
@@ -124,6 +158,81 @@ def extract_articles(html_content, source_url):
             soup.find_all('div', class_=['post', 'entry', 'blog-post', 'news-item']) or
             soup.select('.post, .article, .blog-item, .news-entry')
         )
+
+# Display incidents
+st.header("Detailed Incidents")
+
+if st.session_state.incidents_fetched:
+    if st.session_state.incidents:
+        for i, incident in enumerate(st.session_state.incidents, 1):
+            st.markdown(format_incident_card(incident, i), unsafe_allow_html=True)
+            
+            # Add expandable details section
+            with st.expander(f"View Details - {incident['title'][:50]}..."):
+                st.subheader("Affected Vendors")
+                if incident.get("vendors") and len(incident["vendors"]) > 0:
+                    st.write(", ".join(incident["vendors"]))
+                else:
+                    st.write("No specific vendors identified")
+                
+                st.subheader("Impact")
+                st.write(incident.get("impact", "No impact information available"))
+                
+                if incident.get("cve_ids") and len(incident["cve_ids"]) > 0:
+                    st.subheader("CVE IDs")
+                    st.write(", ".join(incident["cve_ids"]))
+                
+                if incident.get("mitigation"):
+                    st.subheader("Mitigation")
+                    st.write(incident["mitigation"])
+                
+                st.subheader("Severity Score")
+                severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
+                st.write(f"{severity} (Score: {incident.get('score', 0)})")
+                
+                # Add raw date information for debugging
+                if debug_mode:
+                    st.subheader("Date Information (Debug)")
+                    st.write(f"Raw date string: {incident.get('date', 'N/A')}")
+                    parsed_date = parse_article_date(incident.get('date', ''))
+                    st.write(f"Parsed date: {parsed_date}")
+                    cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
+                    cutoff = cutoff.replace(tzinfo=None)  # Ensure naive datetime
+                    st.write(f"Is newer than cutoff ({cutoff}): {parsed_date >= cutoff if parsed_date else 'Unknown'}")
+    else:
+        st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
+else:
+    st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest cybersecurity information.")
+
+# Display information about the app in the sidebar
+with st.sidebar:
+    st.title("About")
+    st.markdown("""
+    This app fetches and displays recent cybersecurity incidents affecting major vendors.
+    
+    **Features:**
+    - Monitors 25+ cybersecurity news sources
+    - Tracks incidents for 50+ major vendors
+    - Calculates severity scores
+    - Export data to CSV
+    
+    **How it works:**
+    1. Set the number of days to look back
+    2. Click "FETCH CYBERSECURITY INCIDENTS"
+    3. View and analyze the results
+    """)
+    
+    st.markdown("---")
+    st.subheader("Sources")
+    st.markdown("Data is collected from reputable cybersecurity sources including:")
+    sources_list = ["SANS ISC", "CISA", "Bleeping Computer", "Krebs on Security", "Talos Intelligence", "The Hacker News"]
+    for source in sources_list:
+        st.markdown(f"- {source}")
+
+    # Add contact information for cloud deployment
+    st.markdown("---")
+    st.subheader("Contact")
+    st.markdown("For questions or support, please contact: support@example.com")
         
         # If no structure found, look for headings with links
         if not potential_articles:
@@ -214,6 +323,10 @@ def process_source(source, days_to_look_back):
     # Filter articles based on date
     filtered_articles = []
     cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_look_back)
+    
+    # Ensure the cutoff date is timezone naive
+    if cutoff_date.tzinfo is not None:
+        cutoff_date = cutoff_date.replace(tzinfo=None)
     
     for article in articles:
         # Parse the date
@@ -572,10 +685,13 @@ with st.sidebar:
             results = []
             for date_str in test_dates:
                 parsed = parse_article_date(date_str)
+                cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
+                cutoff = cutoff.replace(tzinfo=None)  # Ensure naive datetime for comparison
+                
                 results.append({
                     "Original": date_str,
                     "Parsed": str(parsed) if parsed else "Failed to parse",
-                    "Is Recent": "Yes" if parsed and parsed >= (datetime.datetime.now() - datetime.timedelta(days=days_ago)) else "No"
+                    "Is Recent": "Yes" if parsed and parsed >= cutoff else "No"
                 })
             
             st.table(results)
@@ -634,77 +750,3 @@ if st.session_state.incidents_fetched and st.session_state.incidents:
         key="download_csv",
         use_container_width=True
     )
-
-# Display incidents
-st.header("Detailed Incidents")
-
-if st.session_state.incidents_fetched:
-    if st.session_state.incidents:
-        for i, incident in enumerate(st.session_state.incidents, 1):
-            st.markdown(format_incident_card(incident, i), unsafe_allow_html=True)
-            
-            # Add expandable details section
-            with st.expander(f"View Details - {incident['title'][:50]}..."):
-                st.subheader("Affected Vendors")
-                if incident.get("vendors") and len(incident["vendors"]) > 0:
-                    st.write(", ".join(incident["vendors"]))
-                else:
-                    st.write("No specific vendors identified")
-                
-                st.subheader("Impact")
-                st.write(incident.get("impact", "No impact information available"))
-                
-                if incident.get("cve_ids") and len(incident["cve_ids"]) > 0:
-                    st.subheader("CVE IDs")
-                    st.write(", ".join(incident["cve_ids"]))
-                
-                if incident.get("mitigation"):
-                    st.subheader("Mitigation")
-                    st.write(incident["mitigation"])
-                
-                st.subheader("Severity Score")
-                severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
-                st.write(f"{severity} (Score: {incident.get('score', 0)})")
-                
-                # Add raw date information for debugging
-                if debug_mode:
-                    st.subheader("Date Information (Debug)")
-                    st.write(f"Raw date string: {incident.get('date', 'N/A')}")
-                    parsed_date = parse_article_date(incident.get('date', ''))
-                    st.write(f"Parsed date: {parsed_date}")
-                    cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
-                    st.write(f"Is newer than cutoff ({cutoff}): {parsed_date >= cutoff if parsed_date else 'Unknown'}")
-    else:
-        st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
-else:
-    st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest cybersecurity information.")
-
-# Display information about the app in the sidebar
-with st.sidebar:
-    st.title("About")
-    st.markdown("""
-    This app fetches and displays recent cybersecurity incidents affecting major vendors.
-    
-    **Features:**
-    - Monitors 25+ cybersecurity news sources
-    - Tracks incidents for 50+ major vendors
-    - Calculates severity scores
-    - Export data to CSV
-    
-    **How it works:**
-    1. Set the number of days to look back
-    2. Click "FETCH CYBERSECURITY INCIDENTS"
-    3. View and analyze the results
-    """)
-    
-    st.markdown("---")
-    st.subheader("Sources")
-    st.markdown("Data is collected from reputable cybersecurity sources including:")
-    sources_list = ["SANS ISC", "CISA", "Bleeping Computer", "Krebs on Security", "Talos Intelligence", "The Hacker News"]
-    for source in sources_list:
-        st.markdown(f"- {source}")
-
-    # Add contact information for cloud deployment
-    st.markdown("---")
-    st.subheader("Contact")
-    st.markdown("For questions or support, please contact: support@example.com")
