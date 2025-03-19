@@ -107,7 +107,7 @@ def extract_articles(html_content, source_url):
         if not potential_articles:
             potential_articles = soup.select('h1 a, h2 a, h3 a')
             
-        for article in potential_articles[:10]:  # Limit to 10 articles per source
+        for article in potential_articles:  # Limit to 10 articles per source
             title_elem = article.find('h1') or article.find('h2') or article.find('h3') or article.find('a')
             
             if title_elem:
@@ -375,7 +375,7 @@ def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries
         
         if use_api and PPLX_API_KEY:
             # Sort by priority and limit to manage API usage
-            articles_to_enhance = unique_articles[:min(15, len(unique_articles))]
+            articles_to_enhance = unique_articles
             
             status_text.text(f"Enhancing {len(articles_to_enhance)} articles with Perplexity API...")
             
