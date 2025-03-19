@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import concurrent.futures
 import threading
 import hashlib
+import dateparser  # Added for better date parsing
 
 # API configuration - getting from environment variables for cloud security
 PPLX_API_KEY = os.environ.get('PPLX_API_KEY', '')
@@ -58,11 +59,16 @@ def format_incident_card(incident, idx):
     """Format a single incident as an HTML card."""
     severity_class = "high-severity" if incident.get("severity_score", 0) > 80 else "medium-severity" if incident.get("severity_score", 0) > 50 else "low-severity"
     
+    # Add a date warning if parsing failed
+    date_warning = ""
+    if incident.get("date_parsing_failed"):
+        date_warning = '<span style="color: orange;">⚠️ Date parsing failed</span>'
+    
     html = f"""
     <div class="incident-card {severity_class}">
         <div class="incident-header">{idx}. {incident['title']}</div>
         <div class="incident-meta">
-            Source: {incident.get('source_name', 'Unknown Source')} | Published: {incident.get('date', 'N/A')}
+            Source: {incident.get('source_name', 'Unknown Source')} | Published: {incident.get('date', 'N/A')} {date_warning}
         </div>
         <div style="margin-top: 15px;">
             <a href="{incident['link']}" target="_blank" class="incident-link">
@@ -89,6 +95,22 @@ def make_request(url):
         return response.text
     except Exception as e:
         st.error(f"Error fetching {url}: {e}")
+        return None
+
+# New date parsing function
+def parse_article_date(date_str):
+    """
+    Parse date strings from various formats to datetime objects.
+    Returns None if parsing fails.
+    """
+    if not date_str or "unknown" in date_str.lower():
+        return None
+    
+    try:
+        # Try to parse with dateparser which handles many formats
+        dt = dateparser.parse(date_str)
+        return dt
+    except:
         return None
 
 def extract_articles(html_content, source_url):
@@ -130,9 +152,26 @@ def extract_articles(html_content, source_url):
                     else:
                         link = source_url + link if source_url.endswith('/') else source_url + '/' + link
                 
-                # Try to find date
-                date_elem = article.find('time') or article.select_one('.date, .meta-date, .published, .post-date')
-                date = date_elem.text.strip() if date_elem else "Unknown date"
+                # Try to find date with more robust selectors
+                date_elem = (
+                    article.find('time') or 
+                    article.select_one('.date, .meta-date, .published, .post-date, .entry-date, .post-meta') or
+                    article.find(attrs={"datetime": True})
+                )
+                
+                # If date element has datetime attribute, use that
+                if date_elem and date_elem.has_attr('datetime'):
+                    date = date_elem['datetime']
+                elif date_elem:
+                    date = date_elem.text.strip()
+                else:
+                    # Look for date pattern in text
+                    date_text = article.text
+                    date_matches = re.search(r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b', date_text)
+                    if date_matches:
+                        date = date_matches.group(0)
+                    else:
+                        date = "Unknown date"
                 
                 # Try to find description/summary
                 desc_elem = article.find('p') or article.select_one('.excerpt, .summary, .description')
@@ -152,6 +191,43 @@ def extract_articles(html_content, source_url):
         st.error(f"Error extracting articles from {source_url}: {e}")
     
     return articles
+
+# Updated process_source function with proper date filtering
+def process_source(source, days_to_look_back):
+    source_url = source["url"]
+    priority = source["priority"]
+    
+    # For SANS ISC diary archive, modify URL to include year and month
+    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
+        current_date = datetime.datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
+    
+    html_content = make_request(source_url)
+    
+    if not html_content:
+        return []
+    
+    articles = extract_articles(html_content, source_url)
+    
+    # Filter articles based on date
+    filtered_articles = []
+    cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days_to_look_back)
+    
+    for article in articles:
+        # Parse the date
+        article_date = parse_article_date(article["date"])
+        
+        # If we could parse the date, check if it's newer than cutoff
+        if article_date and article_date >= cutoff_date:
+            filtered_articles.append(article)
+        elif not article_date:
+            # If we couldn't parse the date, include the article but mark it
+            article["date_parsing_failed"] = True
+            filtered_articles.append(article)
+    
+    return filtered_articles
 
 def query_perplexity_api(query):
     url = "https://api.perplexity.ai/chat/completions"
@@ -201,42 +277,6 @@ def query_perplexity_api(query):
     except Exception as e:
         st.error(f"Error querying Perplexity API: {e}")
         return None
-
-def process_source(source, days_to_look_back):
-    source_url = source["url"]
-    priority = source["priority"]
-    
-    # For SANS ISC diary archive, modify URL to include year and month
-    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
-        current_date = datetime.datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
-    
-    html_content = make_request(source_url)
-    
-    if not html_content:
-        return []
-    
-    articles = extract_articles(html_content, source_url)
-    
-    # Filter articles based on date if possible
-    filtered_articles = []
-    cutoff_date = get_date_n_days_back(days_to_look_back)
-    
-    for article in articles:
-        # Try to parse the date - this is tricky as date formats vary widely
-        try:
-            # This is a simple approach - in a production system you'd want more robust date parsing
-            if "unknown" not in article["date"].lower():
-                article_date = article["date"]
-                # Keep the article if we can't determine its date or if it's after our cutoff
-                filtered_articles.append(article)
-        except:
-            # If date parsing fails, include the article anyway
-            filtered_articles.append(article)
-    
-    return filtered_articles
 
 def enhance_article_data(article):
     query = f"Analyze this cybersecurity news: {article['title']}. If available from the title or description, extract: incident type, affected vendors, CVE numbers, severity, impact, and mitigation steps."
@@ -324,7 +364,8 @@ def extract_vendors_from_text(text):
     
     return found_vendors
 
-def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries=5):
+# Modified fetch_cybersecurity_incidents with debug info
+def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries=5, debug_mode=False):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -340,10 +381,25 @@ def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries
         total_sources = len(high_priority_sources) + len(medium_priority_sources)
         processed_sources = 0
         
+        # Debugging information
+        if debug_mode:
+            debug_container = st.empty()
+            debug_info = []
+        
         # Process high priority sources
         for source in high_priority_sources:
             status_text.text(f"Fetching from {source['url']}...")
             articles = process_source(source, days_to_look_back)
+            
+            # Debug info
+            if debug_mode and articles:
+                debug_info.append({
+                    "Source": source["url"],
+                    "Articles Found": len(articles),
+                    "First Article Date": articles[0]["date"] if articles else "N/A"
+                })
+                debug_container.dataframe(pd.DataFrame(debug_info))
+            
             all_articles.extend(articles)
             processed_sources += 1
             progress_bar.progress(processed_sources / total_sources)
@@ -353,6 +409,16 @@ def fetch_cybersecurity_incidents(days_to_look_back=7, use_api=True, min_entries
             for source in medium_priority_sources:
                 status_text.text(f"Fetching from {source['url']}...")
                 articles = process_source(source, days_to_look_back)
+                
+                # Debug info
+                if debug_mode and articles:
+                    debug_info.append({
+                        "Source": source["url"],
+                        "Articles Found": len(articles),
+                        "First Article Date": articles[0]["date"] if articles else "N/A"
+                    })
+                    debug_container.dataframe(pd.DataFrame(debug_info))
+                
                 all_articles.extend(articles)
                 processed_sources += 1
                 progress_bar.progress(processed_sources / total_sources)
@@ -476,8 +542,43 @@ if 'incidents_fetched' not in st.session_state:
     st.session_state.incidents = []
 
 # Days to look back - slider from 1 to 30
-days_ago = st.slider("Number of days to look back:", min_value=1, max_value=30, value=2, key="days_slider", 
+days_ago = st.slider("Number of days to look back:", min_value=1, max_value=30, value=22, key="days_slider", 
                     help="Select how many days in the past to search for incidents")
+
+# Add debugging options to the sidebar
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("Debug Options")
+    debug_mode = st.checkbox("Enable Debug Mode", value=False)
+    
+    # Option to force current dates for testing
+    force_current_dates = st.checkbox("Force current dates for testing", value=False)
+    
+    if debug_mode:
+        st.write("Current Date:", datetime.datetime.now().strftime("%Y-%m-%d"))
+        st.write("Cutoff Date:", get_date_n_days_back(days_ago))
+        
+        # Test date parsing button
+        if st.button("Test Date Parsing"):
+            # Test date parsing with some sample dates
+            test_dates = [
+                "23 Dec 2024, 5:00pm",
+                "December 17, 2024",
+                "2024-12-09",
+                get_current_date(),
+                get_date_n_days_back(5)
+            ]
+            
+            results = []
+            for date_str in test_dates:
+                parsed = parse_article_date(date_str)
+                results.append({
+                    "Original": date_str,
+                    "Parsed": str(parsed) if parsed else "Failed to parse",
+                    "Is Recent": "Yes" if parsed and parsed >= (datetime.datetime.now() - datetime.timedelta(days=days_ago)) else "No"
+                })
+            
+            st.table(results)
 
 # Perplexity API option
 use_perplexity = st.checkbox("Use Perplexity API for enhanced results", value=bool(PPLX_API_KEY), 
@@ -486,10 +587,33 @@ use_perplexity = st.checkbox("Use Perplexity API for enhanced results", value=bo
 if not PPLX_API_KEY and use_perplexity:
     st.warning("⚠️ Perplexity API key not configured. Set the PPLX_API_KEY environment variable for enhanced results.")
 
+# Define a function to override dates if force_current_dates is enabled
+def get_enhanced_article_data(article, force_current=False):
+    # Use the original enhance_article_data function
+    enhanced = enhance_article_data(article)
+    
+    # If forcing current dates is enabled, override the date
+    if force_current:
+        days_offset = random.randint(0, min(days_ago, 10))
+        past_date = datetime.datetime.now() - datetime.timedelta(days=days_offset)
+        enhanced["date"] = past_date.strftime("%Y-%m-%d")
+    
+    return enhanced
+
 # Single button for fetching incidents
 if st.button("FETCH CYBERSECURITY INCIDENTS", key="fetch_button", use_container_width=True):
     with st.spinner(f"Fetching cybersecurity incidents from the past {days_ago} days..."):
-        incidents = fetch_cybersecurity_incidents(days_ago, use_perplexity)
+        # If force_current_dates is enabled, temporarily override the enhance_article_data function
+        if force_current_dates:
+            original_enhance_article_data = enhance_article_data
+            enhance_article_data = lambda article: get_enhanced_article_data(article, True)
+        
+        incidents = fetch_cybersecurity_incidents(days_ago, use_perplexity, debug_mode=debug_mode)
+        
+        # Restore the original function if needed
+        if force_current_dates:
+            enhance_article_data = original_enhance_article_data
+        
         if incidents:
             st.session_state.incidents = incidents
             st.session_state.incidents_fetched = True
@@ -541,6 +665,15 @@ if st.session_state.incidents_fetched:
                 st.subheader("Severity Score")
                 severity = "High" if incident.get("score", 0) > 70 else "Medium" if incident.get("score", 0) > 40 else "Low"
                 st.write(f"{severity} (Score: {incident.get('score', 0)})")
+                
+                # Add raw date information for debugging
+                if debug_mode:
+                    st.subheader("Date Information (Debug)")
+                    st.write(f"Raw date string: {incident.get('date', 'N/A')}")
+                    parsed_date = parse_article_date(incident.get('date', ''))
+                    st.write(f"Parsed date: {parsed_date}")
+                    cutoff = datetime.datetime.now() - datetime.timedelta(days=days_ago)
+                    st.write(f"Is newer than cutoff ({cutoff}): {parsed_date >= cutoff if parsed_date else 'Unknown'}")
     else:
         st.info(f"No incidents found in the past {days_ago} days. Try adjusting the search period or click the 'FETCH CYBERSECURITY INCIDENTS' button again.")
 else:
