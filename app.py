@@ -1055,11 +1055,7 @@ def main():
     
     # Add a search box
     search_query = st.sidebar.text_input("Search by keyword:")
-    
-    # Warning about API usage
-    if use_api:
-        st.sidebar.warning("Note: Using the API may cause errors if the API key is invalid or if the service is unavailable.")
-    
+   
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
         # Create placeholder for dynamic updating
