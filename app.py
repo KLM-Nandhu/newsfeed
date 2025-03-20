@@ -769,69 +769,14 @@ def determine_content_type(title, description=""):
 
 def get_api_enhanced_incidents(incidents, use_api=True):
     """Enhance incidents with API data if selected"""
-    if not use_api or not PPLX_API_KEY:
-        # If API is disabled, just return the original incidents
-        for incident in incidents:
-            # Add vendor priority score
-            incident['vendor_priority'] = calculate_vendor_priority(incident.get('vendors', []))
-        return incidents
-    
-    enhanced_incidents = []
-    
+    # Just return the original incidents with vendor priority score for now
+    # This disables API functionality but keeps the function for future implementation
     for incident in incidents:
-        # Only process incidents that haven't already been enhanced
-        if not incident.get('api_processed'):
-            try:
-                # Construct query from the incident data
-                query = f"""
-                Please analyze this cybersecurity incident from {incident.get('source_name')}:
-                Title: {incident.get('title')}
-                Description: {incident.get('description')}
-                Date: {incident.get('date')}
-                
-                Extract the following information: type (vulnerability, attack, patch, etc.), 
-                severity level, affected vendors, CVE IDs if present, impact, and recommended mitigation steps.
-                """
-                
-                # API call would go here using 'sonar' model
-                # Example API call implementation:
-                """
-                headers = {
-                    "Authorization": f"Bearer {PPLX_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                
-                payload = {
-                    "model": "sonar",
-                    "messages": [{"role": "user", "content": query}]
-                }
-                
-                response = requests.post(
-                    "https://api.perplexity.ai/chat/completions",
-                    headers=headers,
-                    json=payload
-                )
-                
-                if response.status_code == 200:
-                    api_result = response.json()
-                    # Process API result here
-                """
-                
-                # Mark as processed to avoid reprocessing
-                incident['api_processed'] = True
-                
-            except Exception as e:
-                # Just log error and continue
-                print(f"Error processing incident with API: {e}")
-                pass
-        
-        # Add vendor priority score
         incident['vendor_priority'] = calculate_vendor_priority(incident.get('vendors', []))
-        enhanced_incidents.append(incident)
     
-    return enhanced_incidents
+    return incidents
 
-def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use_api=True):
+def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use_api=False):
     """Fetch incidents from all sources and cache them"""
     conn = setup_database()
     
@@ -878,11 +823,8 @@ def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use
             titles_seen.add(title)
             unique_articles.append(article)
     
-    # Enhance incidents with API data if selected
-    if use_api:
-        enhanced_articles = get_api_enhanced_incidents(unique_articles, use_api)
-    else:
-        enhanced_articles = unique_articles
+    # Calculate vendor priority scores only - no API enhancement
+    enhanced_articles = get_api_enhanced_incidents(unique_articles, False)
         
     # Sort incidents by vendor priority and severity
     enhanced_articles = sorted(enhanced_articles, key=lambda x: (
@@ -1014,9 +956,6 @@ def main():
     # Add a number input for max incidents to display
     max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 5)
     
-    # Add a checkbox for using the Perplexity API
-    use_api = st.sidebar.checkbox("enhanced results From API", False)
-    
     # Filter options
     st.sidebar.header("Filter Options")
     
@@ -1056,7 +995,6 @@ def main():
     # Add a search box
     search_query = st.sidebar.text_input("Search by keyword:")
     
-   
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
         # Create placeholder for dynamic updating
@@ -1129,13 +1067,10 @@ def main():
                     unique_articles.append(article)
             
             # Update status
-            status_text.text("Enhancing incident data...")
+            status_text.text("Processing incident data...")
             
-            # Enhance incidents with API data if selected
-            if use_api:
-                enhanced_articles = get_api_enhanced_incidents(unique_articles, use_api)
-            else:
-                enhanced_articles = unique_articles
+            # Calculate vendor priority and basic incident analysis
+            enhanced_articles = get_api_enhanced_incidents(unique_articles, False)
                 
             # Sort incidents by vendor priority and severity
             enhanced_articles = sorted(enhanced_articles, key=lambda x: (
@@ -1197,7 +1132,7 @@ def main():
             
         except Exception as e:
             st.error(f"Error fetching incidents: {str(e)}")
-            st.error("Please try again or disable the Perplexity API option if the issue persists.")
+            st.error("Please try again or check the source URLs if the issue persists.")
     else:
         # Always display initial message - no cached results on refresh
         st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest security news and incidents.")
