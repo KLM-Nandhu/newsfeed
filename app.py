@@ -238,7 +238,7 @@ def calculate_vendor_priority(vendors):
     
     return priority_score
 
-def is_cache_fresh(conn, hours=24):
+def is_cache_fresh(conn, hours=0):
     """Check if the cache is fresh (updated within the last X hours)"""
     cursor = conn.cursor()
     
