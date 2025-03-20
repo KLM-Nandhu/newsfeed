@@ -1015,7 +1015,7 @@ def main():
     max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 5)
     
     # Add a checkbox for using the Perplexity API
-    use_api = st.sidebar.checkbox("Use Perplexity API for enhanced results", False)
+    use_api = st.sidebar.checkbox("Enhanced results from API", True)
     
     # Filter options
     st.sidebar.header("Filter Options")
