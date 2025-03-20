@@ -1015,7 +1015,7 @@ def main():
     max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 5)
     
     # Add a checkbox for using the Perplexity API
-    use_api = st.sidebar.checkbox("Enhanced results From API", True)
+    use_api = st.sidebar.checkbox("enhanced results From API", False)
     
     # Filter options
     st.sidebar.header("Filter Options")
@@ -1056,7 +1056,7 @@ def main():
     # Add a search box
     search_query = st.sidebar.text_input("Search by keyword:")
     
-    
+   
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
         # Create placeholder for dynamic updating
