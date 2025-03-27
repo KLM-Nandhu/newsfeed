@@ -319,7 +319,7 @@ def format_incident_card(incident, idx):
         
         # Show unique hyperlinks
         if unique_hyperlinks:
-            hyperlinks_html = "<div class='hyperlinks-container'><strong>Related Links:</strong><ul class='hyperlinks-list'>"
+            hyperlinks_html = "<div class='hyperlinks-container'><strong>Hyper Links:</strong><ul class='hyperlinks-list'>"
             for link in unique_hyperlinks[:10]:  # Limit to top 10 hyperlinks
                 try:
                     hyperlinks_html += f"<li><a href='{link}' target='_blank' rel='noopener noreferrer'>{link}</a></li>"
