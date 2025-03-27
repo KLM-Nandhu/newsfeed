@@ -1505,13 +1505,36 @@ def main():
                 # Sort all articles by severity score
                 final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
                 
+                # Enhance the initial set of articles with hyperlinks
+                display_articles = []
+                for article in final_articles[:10]:
+                    if not article.get('hyperlinks') and article.get('link'):
+                        # First try scraping
+                        scraped_data = scrape_full_content(article['link'])
+                        article['hyperlinks'] = scraped_data['hyperlinks']
+                        article['full_content'] = scraped_data['content']
+                        
+                        # If APIs enabled and scraping didn't get good results, try PPLX
+                        if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
+                            pplx_data = enhance_with_pplx(
+                                article['link'],
+                                article['title'],
+                                scraped_data['content']
+                            )
+                            # Combine hyperlinks from both sources
+                            if pplx_data['hyperlinks']:
+                                combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
+                                article['hyperlinks'] = combined_links
+                            if pplx_data['content']:
+                                article['full_content'] = pplx_data['content']
+                    
+                    display_articles.append(article)
+                
                 # Store all fetched articles
                 st.session_state.all_fetched_articles = final_articles
                 
-                # Take top 10 for initial display
-                display_articles = final_articles[:10]
-                
                 # Store shown incident IDs
+                st.session_state.shown_incident_ids = set()
                 for article in display_articles:
                     st.session_state.shown_incident_ids.add(article['id'])
                 
@@ -1522,6 +1545,9 @@ def main():
                 status_text.empty()
                 results_count.empty()
                 progress_bar.empty()
+                
+                # Force a rerun to show the navigation buttons
+                st.rerun()
                     
             except Exception as e:
                 st.error(f"An error occurred while fetching incidents: {str(e)}")
