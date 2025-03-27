@@ -1339,7 +1339,7 @@ def main():
     except Exception:
         pass
     
-    max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 5)
+    max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 10)
     use_api = st.sidebar.checkbox("Use AI Analysis (slower but more detailed)", value=True)
     
     # Set up a fetch button for manual refresh
