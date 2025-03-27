@@ -1476,6 +1476,29 @@ def main():
                         
                         # Process the source
                         articles = process_source(source, 7)  # Using fixed 7 days lookback
+                        
+                        # Enhance articles with hyperlinks immediately
+                        for article in articles:
+                            if article.get('link'):
+                                # First try scraping
+                                scraped_data = scrape_full_content(article['link'])
+                                article['hyperlinks'] = scraped_data['hyperlinks']
+                                article['full_content'] = scraped_data['content']
+                                
+                                # If APIs enabled and scraping didn't get good results, try PPLX
+                                if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
+                                    pplx_data = enhance_with_pplx(
+                                        article['link'],
+                                        article['title'],
+                                        scraped_data['content']
+                                    )
+                                    # Combine hyperlinks from both sources
+                                    if pplx_data['hyperlinks']:
+                                        combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
+                                        article['hyperlinks'] = combined_links
+                                    if pplx_data['content']:
+                                        article['full_content'] = pplx_data['content']
+                        
                         all_articles.extend(articles)
                         sources_processed += 1
                         
@@ -1505,41 +1528,16 @@ def main():
                 # Sort all articles by severity score
                 final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
                 
-                # Enhance the initial set of articles with hyperlinks
-                display_articles = []
-                for article in final_articles[:10]:
-                    if not article.get('hyperlinks') and article.get('link'):
-                        # First try scraping
-                        scraped_data = scrape_full_content(article['link'])
-                        article['hyperlinks'] = scraped_data['hyperlinks']
-                        article['full_content'] = scraped_data['content']
-                        
-                        # If APIs enabled and scraping didn't get good results, try PPLX
-                        if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
-                            pplx_data = enhance_with_pplx(
-                                article['link'],
-                                article['title'],
-                                scraped_data['content']
-                            )
-                            # Combine hyperlinks from both sources
-                            if pplx_data['hyperlinks']:
-                                combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
-                                article['hyperlinks'] = combined_links
-                            if pplx_data['content']:
-                                article['full_content'] = pplx_data['content']
-                    
-                    display_articles.append(article)
-                
                 # Store all fetched articles
                 st.session_state.all_fetched_articles = final_articles
                 
                 # Store shown incident IDs
                 st.session_state.shown_incident_ids = set()
-                for article in display_articles:
+                for article in final_articles[:10]:
                     st.session_state.shown_incident_ids.add(article['id'])
                 
                 # Store in session state
-                st.session_state.articles = display_articles
+                st.session_state.articles = final_articles[:10]
                 
                 # Clear status messages
                 status_text.empty()
