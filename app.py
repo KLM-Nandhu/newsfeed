@@ -5,11 +5,11 @@ import time
 import json
 import random
 import re
-import os
 import hashlib
 import feedparser
 import sqlite3
 import streamlit as st
+import os
 from bs4 import BeautifulSoup
 from pathlib import Path
 import traceback
@@ -1339,7 +1339,6 @@ def main():
     except Exception:
         pass
     
-    max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 10)
     use_api = st.sidebar.checkbox("Use AI Analysis (slower but more detailed)", value=True)
     
     # Set up a fetch button for manual refresh
@@ -1353,7 +1352,7 @@ def main():
         # Setup streaming display
         with results_container:
             incident_placeholders = []
-            for i in range(max_incidents):
+            for i in range(10):  # Fixed to 10 placeholders
                 incident_placeholders.append(st.empty())
         
         try:
@@ -1363,14 +1362,9 @@ def main():
             # Process sources in real-time
             all_articles = []
             sources_processed = 0
-            enough_articles = False
-            high_priority_articles = []
             
-            # Process sources one by one instead of in parallel for streaming effect
+            # Process sources one by one for streaming effect
             for i, source in enumerate(SOURCES):
-                if enough_articles:
-                    break
-                    
                 try:
                     # Update progress
                     progress = (i + 1) / len(SOURCES)
@@ -1379,8 +1373,6 @@ def main():
                     
                     # Process the source
                     articles = process_source(source, 7)  # Using fixed 7 days lookback
-                    
-                    # Add to collection
                     all_articles.extend(articles)
                     sources_processed += 1
                     
@@ -1389,82 +1381,64 @@ def main():
                     
                     # If we have new articles, process and display them
                     if articles:
-                        # Sort what we have so far
-                        temp_sorted = sorted(all_articles, key=lambda x: (
-                            calculate_vendor_priority(x.get('vendors', [])) + x.get('severity_score', 0)
-                        ), reverse=True)
+                        # Sort what we have so far by severity score
+                        temp_sorted = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
                         
-                        # Show top articles so far
-                        displayed_count = min(len(temp_sorted), max_incidents)
+                        # Show top 10 articles so far
+                        displayed_count = min(len(temp_sorted), 10)
                         for idx in range(displayed_count):
-                            # Create or update incident display
                             incident_placeholders[idx].markdown(
                                 format_incident_card(temp_sorted[idx], idx + 1),
                                 unsafe_allow_html=True
                             )
-                        
-                        # Check if we have enough high-priority articles
-                        high_priority_articles = [article for article in temp_sorted if article.get('severity_score', 0) >= 80]
-                        if len(high_priority_articles) >= 5:
-                            enough_articles = True
-                            break
                             
                 except Exception as e:
                     status_text.text(f"Error processing {source['url']}: {str(e)}")
-                    time.sleep(1)  # Brief pause to show the error
+                    time.sleep(1)
             
-            # Process the high-priority articles we found
-            if high_priority_articles:
-                status_text.text("Processing high-priority incidents...")
-                
-                # Process each high-priority article
-                for i, article in enumerate(high_priority_articles[:5]):  # Only process first 5
-                    try:
-                        # Update status for each article being processed
-                        status_text.text(f"Scraping content for: {article['title'][:50]}...")
+            # Final processing of top 10 articles
+            status_text.text("Processing final incidents...")
+            
+            # Sort all articles by severity score and take top 10
+            final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)[:10]
+            
+            # Process each article in the top 10
+            for i, article in enumerate(final_articles):
+                try:
+                    status_text.text(f"Scraping content for: {article['title'][:50]}...")
+                    
+                    # Scrape full content
+                    if article.get('link'):
+                        scraped_data = scrape_full_content(article['link'])
+                        article['full_content'] = scraped_data['content']
+                        article['hyperlinks'] = scraped_data['hyperlinks']
                         
-                        # Scrape full content
-                        if article.get('link'):
-                            scraped_data = scrape_full_content(article['link'])
-                            article['full_content'] = scraped_data['content']
-                            article['hyperlinks'] = scraped_data['hyperlinks']
+                        # If using API and content is insufficient, try PPLX
+                        if use_api and (not article['full_content'] or len(article['full_content']) < 500):
+                            status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
+                            pplx_data = enhance_with_pplx(
+                                article['link'],
+                                article['title'],
+                                article['full_content']
+                            )
                             
-                            # If using API and content is insufficient, try PPLX
-                            if use_api and (not article['full_content'] or len(article['full_content']) < 500):
-                                status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
-                                pplx_data = enhance_with_pplx(
-                                    article['link'],
-                                    article['title'],
-                                    article['full_content']
-                                )
-                                
-                                if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
-                                    article['full_content'] = pplx_data['content']
-                                    # Combine hyperlinks
-                                    article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
-                        
-                        # Update card with new content
-                        incident_placeholders[i].markdown(
-                            format_incident_card(article, i + 1),
-                            unsafe_allow_html=True
-                        )
-                        
-                    except Exception as e:
-                        print(f"Error processing article {i}: {e}")
-                
-                # Calculate vendor priority and enhanced analysis
-                status_text.text("Performing AI analysis on high-priority incidents...")
-                enhanced_articles = get_api_enhanced_incidents(high_priority_articles[:5], use_api)
-                
-                # Display final results
-                st.subheader("High-Priority Cybersecurity Incidents")
-                for idx, incident in enumerate(enhanced_articles):
-                    st.markdown(
-                        format_incident_card(incident, idx + 1),
+                            if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
+                                article['full_content'] = pplx_data['content']
+                                article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
+                    
+                    # Update display with enhanced content
+                    incident_placeholders[i].markdown(
+                        format_incident_card(article, i + 1),
                         unsafe_allow_html=True
                     )
-            else:
-                st.info("No high-priority incidents found. Please try again or check your internet connection.")
+                    
+                except Exception as e:
+                    print(f"Error processing article {i}: {e}")
+            
+            # Clear status messages
+            status_text.empty()
+            results_count.empty()
+            progress_bar.empty()
                 
         except Exception as e:
             st.error(f"An error occurred while fetching incidents: {str(e)}")
