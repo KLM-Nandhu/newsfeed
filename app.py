@@ -1439,7 +1439,7 @@ def main():
         st.sidebar.warning("Please fetch incidents first using the main button.")
 
     # Set up a fetch button for manual refresh
-    if st.button("FETCH CYBERSECURITY INCIDENTS"):
+    if st.button("FETCH"):
         if not st.session_state.processing:
             st.session_state.processing = True
             # Reset tracking of shown incidents when fetching new ones
