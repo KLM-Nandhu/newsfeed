@@ -1370,44 +1370,73 @@ def main():
     
     use_api = st.sidebar.checkbox("Use AI Analysis (slower but more detailed)", value=True)
     
-    # Add "Load Next 10 Incidents" button in sidebar
-    if st.sidebar.button("Load Next 10 Incidents"):
-        if len(st.session_state.all_fetched_articles) > 0:
-            # Get next 10 unshown incidents
-            next_articles = []
-            for article in st.session_state.all_fetched_articles:
-                if article['id'] not in st.session_state.shown_incident_ids and len(next_articles) < 10:
-                    # Enhance article with full content and hyperlinks if not already done
-                    if not article.get('hyperlinks') and article.get('link'):
-                        # First try scraping
-                        scraped_data = scrape_full_content(article['link'])
-                        article['hyperlinks'] = scraped_data['hyperlinks']
-                        article['full_content'] = scraped_data['content']
-                        
-                        # If APIs enabled and scraping didn't get good results, try PPLX
-                        if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
-                            pplx_data = enhance_with_pplx(
-                                article['link'],
-                                article['title'],
-                                scraped_data['content']
-                            )
-                            # Combine hyperlinks from both sources
-                            if pplx_data['hyperlinks']:
-                                combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
-                                article['hyperlinks'] = combined_links
-                            if pplx_data['content']:
-                                article['full_content'] = pplx_data['content']
+    # Add navigation buttons in sidebar
+    if len(st.session_state.all_fetched_articles) > 0:
+        col1, col2 = st.sidebar.columns(2)
+        
+        with col1:
+            if st.button("Previous 10"):
+                # Get the current set of shown incident IDs
+                current_ids = list(st.session_state.shown_incident_ids)
+                if len(current_ids) > 10:
+                    # Remove the last 10 IDs from shown_incident_ids
+                    for id in current_ids[-10:]:
+                        st.session_state.shown_incident_ids.remove(id)
                     
-                    next_articles.append(article)
-                    st.session_state.shown_incident_ids.add(article['id'])
-            
-            if next_articles:
-                st.session_state.articles = next_articles
-                st.rerun()
-            else:
-                st.sidebar.warning("No more new incidents available. Please fetch new incidents.")
-        else:
-            st.sidebar.warning("Please fetch incidents first using the main button.")
+                    # Get the previous 10 articles
+                    prev_articles = []
+                    for article in st.session_state.all_fetched_articles:
+                        if article['id'] in current_ids[-10:]:
+                            prev_articles.append(article)
+                    
+                    if prev_articles:
+                        st.session_state.articles = prev_articles
+                        st.rerun()
+        
+        with col2:
+            if st.button("Next 10"):
+                # Get next 10 unshown incidents
+                next_articles = []
+                for article in st.session_state.all_fetched_articles:
+                    if article['id'] not in st.session_state.shown_incident_ids and len(next_articles) < 10:
+                        # Enhance article with full content and hyperlinks if not already done
+                        if not article.get('hyperlinks') and article.get('link'):
+                            # First try scraping
+                            scraped_data = scrape_full_content(article['link'])
+                            article['hyperlinks'] = scraped_data['hyperlinks']
+                            article['full_content'] = scraped_data['content']
+                            
+                            # If APIs enabled and scraping didn't get good results, try PPLX
+                            if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
+                                pplx_data = enhance_with_pplx(
+                                    article['link'],
+                                    article['title'],
+                                    scraped_data['content']
+                                )
+                                # Combine hyperlinks from both sources
+                                if pplx_data['hyperlinks']:
+                                    combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
+                                    article['hyperlinks'] = combined_links
+                                if pplx_data['content']:
+                                    article['full_content'] = pplx_data['content']
+                        
+                        next_articles.append(article)
+                        st.session_state.shown_incident_ids.add(article['id'])
+                
+                if next_articles:
+                    st.session_state.articles = next_articles
+                    st.rerun()
+                else:
+                    st.sidebar.warning("No more new incidents available. Please fetch new incidents.")
+        
+        # Show current position
+        total_articles = len(st.session_state.all_fetched_articles)
+        shown_count = len(st.session_state.shown_incident_ids)
+        current_page = (shown_count - 1) // 10 + 1
+        total_pages = (total_articles + 9) // 10
+        st.sidebar.info(f"Page {current_page} of {total_pages}")
+    else:
+        st.sidebar.warning("Please fetch incidents first using the main button.")
 
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
