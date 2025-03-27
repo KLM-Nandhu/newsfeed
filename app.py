@@ -1382,8 +1382,8 @@ def main():
             
             if next_articles:
                 st.session_state.articles = next_articles
-                # Clear existing display and show new incidents
-                st.experimental_rerun()
+                # Use st.rerun() instead of st.experimental_rerun()
+                st.rerun()
             else:
                 st.sidebar.warning("No more new incidents available. Please fetch new incidents.")
         else:
