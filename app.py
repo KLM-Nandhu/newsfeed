@@ -262,7 +262,7 @@ def update_cache_timestamp(conn):
     conn.commit()
 
 def format_incident_card(incident, idx):
-    """Format a single incident as an HTML card with a brief summary."""
+    """Format a single incident as an HTML card with summary and hyperlinks."""
     severity_class = "high-severity" if incident.get("severity_score", 0) > 80 else "medium-severity" if incident.get("severity_score", 0) > 50 else "low-severity"
     
     # Format date nicely if available
@@ -300,9 +300,32 @@ def format_incident_card(incident, idx):
     summary = incident.get('summary', '')
     if not summary and incident.get('description'):
         # Use description as fallback if no summary
-        summary = incident.get('description')[:300] + "..."
+        summary = incident.get('description')
     
     summary_html = f"<div class='incident-summary'>{summary}</div>" if summary else ""
+    
+    # Format hyperlinks
+    hyperlinks_html = ""
+    if incident.get('hyperlinks') and len(incident.get('hyperlinks', [])) > 0:
+        # Get unique hyperlinks
+        unique_hyperlinks = []
+        seen_urls = set()
+        for link in incident.get('hyperlinks', []):
+            # Normalize URL for comparison
+            normalized_url = link.rstrip('/')
+            if normalized_url not in seen_urls and normalized_url != incident.get('link', '').rstrip('/'):
+                seen_urls.add(normalized_url)
+                unique_hyperlinks.append(link)
+        
+        # Show unique hyperlinks
+        if unique_hyperlinks:
+            hyperlinks_html = "<div class='hyperlinks-container'><strong>Related Links:</strong><ul class='hyperlinks-list'>"
+            for link in unique_hyperlinks[:10]:  # Limit to top 10 hyperlinks
+                try:
+                    hyperlinks_html += f"<li><a href='{link}' target='_blank' rel='noopener noreferrer'>{link}</a></li>"
+                except:
+                    continue
+            hyperlinks_html += "</ul></div>"
     
     # Create the full HTML for the incident card
     html = f"""
@@ -317,6 +340,7 @@ def format_incident_card(incident, idx):
         <div class="incident-link-container">
             {link_html}
         </div>
+        {hyperlinks_html}
     </div>
     """
     return html
@@ -876,20 +900,20 @@ def enhance_with_pplx(url, title, content=""):
             "Authorization": f"Bearer {PPLX_API_KEY}"
         }
         
-        # First, get a brief summary
+        # Get a detailed summary
         summary_payload = {
             "model": "llama-3.1-sonar-small-128k-online",
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a cybersecurity content summarizer. Provide a 2-3 line concise summary of the key points from the article title and content. Focus on the impact, affected systems, and any critical details."
+                    "content": "You are a cybersecurity content summarizer. Provide a detailed summary of the article focusing on key impacts, technical details, and consequences. Include specific numbers, systems affected, and any financial or operational impacts mentioned."
                 },
                 {
                     "role": "user",
-                    "content": f"Provide a 2-3 line summary of this cybersecurity article:\nTitle: {title}\nContent: {content[:2000]}"
+                    "content": f"Provide a detailed summary of this cybersecurity article:\nTitle: {title}\nContent: {content[:4000]}"
                 }
             ],
-            "max_tokens": 150
+            "max_tokens": 500
         }
         
         summary_response = requests.post(
