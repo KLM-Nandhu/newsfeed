@@ -1377,12 +1377,32 @@ def main():
             next_articles = []
             for article in st.session_state.all_fetched_articles:
                 if article['id'] not in st.session_state.shown_incident_ids and len(next_articles) < 10:
+                    # Enhance article with full content and hyperlinks if not already done
+                    if not article.get('hyperlinks') and article.get('link'):
+                        # First try scraping
+                        scraped_data = scrape_full_content(article['link'])
+                        article['hyperlinks'] = scraped_data['hyperlinks']
+                        article['full_content'] = scraped_data['content']
+                        
+                        # If APIs enabled and scraping didn't get good results, try PPLX
+                        if use_api and (not scraped_data['content'] or len(scraped_data['content']) < 500):
+                            pplx_data = enhance_with_pplx(
+                                article['link'],
+                                article['title'],
+                                scraped_data['content']
+                            )
+                            # Combine hyperlinks from both sources
+                            if pplx_data['hyperlinks']:
+                                combined_links = list(set(scraped_data['hyperlinks'] + pplx_data['hyperlinks']))
+                                article['hyperlinks'] = combined_links
+                            if pplx_data['content']:
+                                article['full_content'] = pplx_data['content']
+                    
                     next_articles.append(article)
                     st.session_state.shown_incident_ids.add(article['id'])
             
             if next_articles:
                 st.session_state.articles = next_articles
-                # Use st.rerun() instead of st.experimental_rerun()
                 st.rerun()
             else:
                 st.sidebar.warning("No more new incidents available. Please fetch new incidents.")
