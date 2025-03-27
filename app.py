@@ -5,18 +5,17 @@ import time
 import json
 import random
 import re
-import os
 import hashlib
 import feedparser
 import sqlite3
 import streamlit as st
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
-import threading
 from pathlib import Path
 import traceback
 from urllib.parse import urlparse, urljoin
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # API configuration - getting from environment variables for cloud security
 PPLX_API_KEY = os.environ.get("PPLX_API_KEY")
@@ -24,10 +23,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 # Updated list of cybersecurity news sources to include both websites and RSS feeds
 SOURCES = [
-    # Critical priority sources
-    {"url": "https://cve.mitre.org/data/downloads/allitems.xml", "priority": "critical", "type": "cve_feed"},
-    
-    # High priority sources
+    {"url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "priority": "high", "type": "web"},
+    {"url": "https://github.com/CVEProject/cvelistV5/tree/main/cves", "priority": "high", "type": "web"},
     {"url": "https://www.sans.org/blog/feed/", "priority": "high", "type": "rss"},
     {"url": "https://isc.sans.edu/diary.xml", "priority": "high", "type": "rss"},
     {"url": "https://www.cisa.gov/cybersecurity-advisories/feed", "priority": "high", "type": "rss"},
@@ -89,18 +86,8 @@ UNOFFICIAL_DOMAINS = [
     "slideshare.net", "flickr.com", "vimeo.com", "dailymotion.com"
 ]
 
-# List of major vendors to track - with priority weights (higher number = higher priority)
-VENDOR_PRIORITIES = {
-    "Microsoft": 100, "Cisco": 95, "Oracle": 90, "Google": 90, "Apple": 90, 
-    "Amazon": 85, "IBM": 85, "Adobe": 85, "VMware": 85, "SAP": 80,
-    "Fortinet": 80, "Palo Alto": 80, "Juniper": 75, "F5": 75, "Citrix": 75, 
-    "Red Hat": 75, "Ubuntu": 70, "Linux": 75, "Android": 75, "Windows": 80,
-    "CrowdStrike": 70, "Kaspersky": 70, "Symantec": 70, "McAfee": 70, "ESET": 65, 
-    "Trend Micro": 70, "SentinelOne": 65, "Sophos": 65, "CheckPoint": 70, "Bitdefender": 65,
-    "Avast": 60, "AVG": 60, "Norton": 65, "Malwarebytes": 65, "SolarWinds": 70,
-    "Splunk": 70, "Zoom": 65, "Slack": 65, "Okta": 70, "GitLab": 65, 
-    "GitHub": 70, "Docker": 70, "Kubernetes": 70, "Atlassian": 65
-}
+# List of major vendors to track - all with equal priority
+VENDOR_PRIORITIES = {}  # Empty dictionary since we're not using vendor priorities anymore
 
 # Headers to mimic a browser request
 HEADERS = {
@@ -189,7 +176,7 @@ def store_incident(conn, incident):
         ))
         conn.commit()
     except Exception as e:
-        st.error(f"Error storing incident in database: {e}")
+        print(f"Error storing incident in database: {e}")
 
 def get_cached_incidents(conn, days_to_look_back):
     """Get cached incidents from the database"""
@@ -235,20 +222,12 @@ def get_cached_incidents(conn, days_to_look_back):
         
         return incidents
     except Exception as e:
-        st.error(f"Error retrieving cached incidents: {e}")
+        print(f"Error retrieving cached incidents: {e}")
         return []
 
 def calculate_vendor_priority(vendors):
-    """Calculate a priority score based on affected vendors"""
-    if not vendors:
-        return 0
-    
-    priority_score = 0
-    for vendor in vendors:
-        # Get the priority weight for this vendor, default to 50 if not in our list
-        priority_score += VENDOR_PRIORITIES.get(vendor, 50)
-    
-    return priority_score
+    """Calculate a priority score based on affected vendors - now returns 0 since we're using GPT analysis"""
+    return 0
 
 def is_cache_fresh(conn, hours=0):
     """Check if the cache is fresh (updated within the last X hours)"""
@@ -387,12 +366,16 @@ def get_date_n_days_back(n):
 
 def make_request(url):
     try:
+        # Skip CVE.org URLs if they're causing timeouts
+        if 'cve.org' in url.lower():
+            return None
+            
         time.sleep(random.uniform(0.5, 2))  # Reduced delay for better performance
         response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
         return response.text
     except Exception as e:
-        st.error(f"Error fetching {url}: {e}")
+        print(f"Error fetching {url}: {e}")
         return None
 
 def is_valid_source(url):
@@ -626,7 +609,7 @@ def extract_articles_from_rss(source_url, days_to_look_back):
                 "source_name": source_name
             })
     except Exception as e:
-        st.error(f"Error extracting articles from RSS feed {source_url}: {e}")
+        print(f"Error extracting articles from RSS feed {source_url}: {e}")
     
     return articles
 
@@ -736,7 +719,7 @@ def extract_articles_from_web(html_content, source_url, days_to_look_back):
                     })
         
     except Exception as e:
-        st.error(f"Error extracting articles from {source_url}: {e}")
+        print(f"Error extracting articles from {source_url}: {e}")
     
     return articles
 
@@ -746,10 +729,37 @@ def scrape_full_content(url):
         # Make request to the article URL
         html_content = make_request(url)
         if not html_content:
-            return {"content": "", "hyperlinks": [], "related_articles": []}
+            return {"content": "", "hyperlinks": [], "related_articles": [], "published_date": None}
         
         # Parse HTML content
         soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Special handling for CVE pages
+        if 'cve.org' in url.lower():
+            # Try to find the published date
+            published_date = None
+            date_elements = soup.select('.col-lg-9 td, .col-lg-9 th')  # Adjust selectors based on CVE page structure
+            for element in date_elements:
+                if 'Published:' in element.get_text():
+                    date_text = element.find_next_sibling('td')
+                    if date_text:
+                        published_date = date_text.get_text().strip()
+                        break
+            
+            # Extract CVE content
+            cve_content = []
+            content_sections = soup.select('.col-lg-9 table, .vulnerability-info, .cve-record')
+            for section in content_sections:
+                text = section.get_text(strip=True)
+                if text:
+                    cve_content.append(text)
+            
+            return {
+                "content": '\n'.join(cve_content),
+                "hyperlinks": [],  # CVE pages typically don't have relevant hyperlinks
+                "related_articles": [],
+                "published_date": published_date
+            }
         
         # Remove unwanted elements like scripts, styles, and navigation
         for element in soup.select('script, style, nav, header, footer, .sidebar, .comments, .advertisement, iframe'):
@@ -773,9 +783,26 @@ def scrape_full_content(url):
         if not article_content or len(article_content.get_text(strip=True)) < 200:
             article_content = soup.body
         
+        # Try to find published date
+        published_date = None
+        date_selectors = [
+            'time', '[itemprop="datePublished"]', '.published', '.post-date', '.entry-date',
+            '.article-date', '.date', '[property="article:published_time"]'
+        ]
+        
+        for selector in date_selectors:
+            date_element = soup.select_one(selector)
+            if date_element:
+                # Check for datetime attribute first
+                published_date = date_element.get('datetime', date_element.get('content', ''))
+                if not published_date:
+                    published_date = date_element.get_text().strip()
+                if published_date:
+                    break
+        
         # Clean the content by removing extra whitespace
         if not article_content:
-            return {"content": "", "hyperlinks": [], "related_articles": []}
+            return {"content": "", "hyperlinks": [], "related_articles": [], "published_date": published_date}
             
         # Extract text content, preserve basic structure
         paragraphs = []
@@ -789,9 +816,54 @@ def scrape_full_content(url):
         
         full_text = '<p>' + '</p><p>'.join(paragraphs) + '</p>'
         
-        # Extract all hyperlinks from the content
-        hyperlinks = []
+        # First, extract related articles with high priority
+        related_articles = []
+        related_hyperlinks = set()  # Use set to avoid duplicates
+        
+        # Expanded list of related article selectors
+        related_selectors = [
+            '.related-articles', '.related-posts', '.similar-articles', '#related-articles',
+            '.see-also', '.recommended', '.more-like-this', '.suggested-articles',
+            '[data-related]', '[data-recommended]', '.related-content', '.article-suggestions',
+            '.further-reading', '.read-more', '.also-read', '.similar-stories'
+        ]
+        
+        # First try specific related article sections
+        related_sections = soup.select(', '.join(related_selectors))
+        
+        if not related_sections:
+            # Try finding related articles in the sidebar or at the bottom
+            related_sections = soup.select('.sidebar, .post-footer, .article-footer, .content-footer')
+        
         base_url = '{uri.scheme}://{uri.netloc}'.format(uri=urlparse(url))
+        
+        # Process related articles first
+        for section in related_sections:
+            links = section.find_all('a') if section else []
+            for link in links:
+                href = link.get('href', '')
+                title = link.get_text(strip=True)
+                
+                if href and title and len(title) > 10:  # Skip very short titles
+                    # Make relative URLs absolute
+                    if not href.startswith(('http://', 'https://')):
+                        href = urljoin(base_url, href)
+                    
+                    # Skip if it's not a valid article link
+                    if any(term in href.lower() for term in ['share', 'twitter', 'facebook', 'email', 'print', 'comment']):
+                        continue
+                    
+                    # Normalize URL
+                    normalized_href = href.rstrip('/')
+                    if normalized_href not in related_hyperlinks:
+                        related_hyperlinks.add(normalized_href)
+                        related_articles.append({
+                            'title': title,
+                            'link': href
+                        })
+        
+        # Now extract remaining hyperlinks from the content
+        content_hyperlinks = []
         
         # Find all links in the article content
         for a_tag in article_content.find_all('a', href=True):
@@ -809,47 +881,24 @@ def scrape_full_content(url):
             if is_valid_source(link) and not any(term in link.lower() for term in ['share', 'twitter', 'facebook', 'email', 'print', 'comment']):
                 # Normalize URL by removing trailing slash
                 normalized_link = link.rstrip('/')
-                if normalized_link not in hyperlinks:  # Avoid duplicates
-                    hyperlinks.append(normalized_link)
+                # Only add if not already in related articles
+                if normalized_link not in related_hyperlinks:
+                    content_hyperlinks.append(normalized_link)
         
-        # Extract related articles
-        related_articles = []
-        related_sections = soup.select('.related-articles, .related-posts, .similar-articles, #related-articles')
-        
-        if not related_sections:
-            # Try finding related articles in the sidebar or at the bottom
-            related_sections = soup.select('.sidebar a, .post-footer a, .article-footer a')
-        
-        for section in related_sections:
-            links = section.find_all('a') if section else []
-            for link in links:
-                href = link.get('href', '')
-                title = link.get_text(strip=True)
-                
-                if href and title and len(title) > 10:  # Skip very short titles
-                    # Make relative URLs absolute
-                    if not href.startswith(('http://', 'https://')):
-                        href = urljoin(base_url, href)
-                    
-                    # Skip if it's not a valid article link
-                    if any(term in href.lower() for term in ['share', 'twitter', 'facebook', 'email', 'print', 'comment']):
-                        continue
-                    
-                    related_articles.append({
-                        'title': title,
-                        'link': href
-                    })
+        # Combine hyperlinks with related articles first, then content links
+        all_hyperlinks = list(related_hyperlinks) + content_hyperlinks
         
         return {
             "content": full_text,
-            "hyperlinks": hyperlinks,  # Return full URLs
-            "related_articles": related_articles  # Add related articles
+            "hyperlinks": all_hyperlinks,
+            "related_articles": related_articles,
+            "published_date": published_date
         }
         
     except Exception as e:
         print(f"Error scraping content from {url}: {e}")
         traceback.print_exc()
-        return {"content": "", "hyperlinks": [], "related_articles": []}
+        return {"content": "", "hyperlinks": [], "related_articles": [], "published_date": None}
 
 def enhance_with_pplx(url, title, content=""):
     """Use PPLX API to extract and analyze content from complex websites"""
@@ -922,11 +971,11 @@ def analyze_with_openai(title, content, hyperlinks):
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a cybersecurity analyst assistant. Analyze the provided content from a security article. Extract key information about impact, severity, affected systems, and mitigation steps."
+                    "content": "You are a cybersecurity analyst assistant. Analyze the provided content from a security article and determine its importance and severity. Consider factors like: potential impact, number of affected systems/users, ease of exploitation, availability of patches/mitigations, and real-world exploitation status."
                 },
                 {
                     "role": "user",
-                    "content": f"Title: {title}\n\nContent: {content[:4000]}...\n\nAnalyze this cybersecurity article and provide: 1) Impact assessment (who is affected and how severely), 2) Mitigation recommendations, 3) A severity score from 0-100 where higher means more severe."
+                    "content": f"Title: {title}\n\nContent: {content[:4000]}...\n\nAnalyze this cybersecurity article and provide:\n1) Impact assessment (who is affected and how severely)\n2) Mitigation recommendations\n3) A severity score from 0-100 where higher means more severe. Consider:\n- Potential impact (data breach, system compromise, etc.)\n- Number of affected systems/users\n- Ease of exploitation\n- Availability of patches/mitigations\n- Evidence of active exploitation\n- Technical complexity of the issue"
                 }
             ],
             "max_tokens": 1000
@@ -982,51 +1031,44 @@ def process_source(source, days_to_look_back):
     source_type = source["type"]
     priority = source["priority"]
     
-    # Special handling for CVE Mitre feed
-    if source_type == "cve_feed":
-        try:
-            response = requests.get(source_url)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'xml')
-                recent_cves = []
-                
-                for item in soup.find_all('item'):
-                    # Get CVE publication date
-                    pub_date = item.find('published-datetime')
-                    if pub_date and is_within_date_range(pub_date.text, days_to_look_back):
-                        cve_id = item.find('cve-id').text if item.find('cve-id') else ""
-                        desc = item.find('desc').text if item.find('desc') else ""
-                        
-                        article = {
-                            "title": f"{cve_id}: New Vulnerability",
-                            "link": f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_id}",
-                            "date": pub_date.text,
-                            "description": desc[:300] + "..." if len(desc) > 300 else desc,
-                            "source": source_url,
-                            "source_name": "CVE Mitre",
-                            "type": "vulnerability",
-                            "severity": "high",
-                            "severity_score": 80,
-                            "cve_ids": [cve_id]
-                        }
-                        recent_cves.append(article)
-                return recent_cves
-            return []
-        except Exception as e:
-            st.error(f"Error processing CVE Mitre feed: {e}")
-            return []
+    # Skip CVE.org sources
+    if 'cve.org' in source_url.lower():
+        return []
     
-    # Regular RSS and web processing
+    # For SANS ISC diary archive, modify URL to include year and month
+    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
+        current_date = datetime.datetime.now()
+        current_year = current_date.year
+        current_month = current_date.month
+        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
+    
     if source_type == "rss":
+        # For RSS feeds, use feedparser
         articles = extract_articles_from_rss(source_url, days_to_look_back)
     else:
+        # For web pages, fetch and parse HTML
         html_content = make_request(source_url)
         if not html_content:
             return []
         articles = extract_articles_from_web(html_content, source_url, days_to_look_back)
     
     # Pre-process articles
+    processed_articles = []
     for article in articles:
+        # Skip articles from CVE.org
+        if article.get('link') and 'cve.org' in article.get('link').lower():
+            continue
+            
+        # Try to scrape full content to get published date if not available
+        if article.get('date') == 'Unknown date' and article.get('link'):
+            scraped_data = scrape_full_content(article['link'])
+            if scraped_data.get('published_date'):
+                article['date'] = format_date_string(scraped_data['published_date'])
+        
+        # Skip articles without a valid date
+        if article.get('date') == 'Unknown date':
+            continue
+        
         # Generate a unique ID for the incident
         article["id"] = hashlib.md5(f"{article['title']}:{article['link']}".encode()).hexdigest()
         
@@ -1049,8 +1091,10 @@ def process_source(source, days_to_look_back):
         else:
             article["severity"] = "medium"
             article["severity_score"] = 50
+        
+        processed_articles.append(article)
             
-    return articles
+    return processed_articles
 
 def determine_content_type(title, description=""):
     """Determine the content type based on keywords in the title and description"""
@@ -1073,9 +1117,6 @@ def get_api_enhanced_incidents(incidents, use_api=True):
     enhanced_incidents = []
     
     for incident in incidents:
-        # Calculate vendor priority score
-        incident['vendor_priority'] = calculate_vendor_priority(incident.get('vendors', []))
-        
         # Skip if no link available
         if not incident.get('link'):
             enhanced_incidents.append(incident)
@@ -1115,8 +1156,6 @@ def get_api_enhanced_incidents(incidents, use_api=True):
             additional_vendors = extract_vendors_from_text(incident['full_content'])
             if additional_vendors:
                 incident['vendors'] = list(set(incident.get('vendors', []) + additional_vendors))
-                # Recalculate vendor priority with new vendors
-                incident['vendor_priority'] = calculate_vendor_priority(incident['vendors'])
         
         # Use OpenAI to analyze content if enabled and content is available
         if use_api and incident['full_content'] and len(incident['full_content']) > 200:
@@ -1156,10 +1195,8 @@ def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use
     if is_cache_fresh(conn, cache_hours):
         incidents = get_cached_incidents(conn, days_to_look_back)
         
-        # Sort incidents by vendor priority and severity
-        incidents = sorted(incidents, key=lambda x: (
-            x.get('vendor_priority', 0) + x.get('severity_score', 0)
-        ), reverse=True)
+        # Sort incidents by severity score only (no vendor priority)
+        incidents = sorted(incidents, key=lambda x: x.get('severity_score', 0), reverse=True)
         
         # Limit number of incidents if specified
         if max_incidents and isinstance(max_incidents, int) and max_incidents > 0:
@@ -1182,30 +1219,33 @@ def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use
                 all_articles.extend(articles)
                 sources_processed += 1
             except Exception as e:
-                st.error(f"Error processing source {source['url']}: {e}")
+                print(f"Error processing source {source['url']}: {e}")
     
-    # Remove duplicates (based on title similarity)
-    unique_articles = []
-    titles_seen = set()
-    
+    # Group articles by source to ensure distribution
+    articles_by_source = {}
     for article in all_articles:
-        title = article['title'].lower()
-        # Skip if we've seen a very similar title
-        if not any(title in t or t in title for t in titles_seen):
-            titles_seen.add(title)
-            unique_articles.append(article)
+        source = article.get('source_name', '')
+        if source not in articles_by_source:
+            articles_by_source[source] = []
+        articles_by_source[source].append(article)
+    
+    # Distribute articles across sources
+    distributed_articles = []
+    while len(distributed_articles) < max_incidents and articles_by_source:
+        for source in list(articles_by_source.keys()):
+            if articles_by_source[source]:
+                article = articles_by_source[source].pop(0)
+                distributed_articles.append(article)
+                if not articles_by_source[source]:
+                    del articles_by_source[source]
+            if len(distributed_articles) >= max_incidents:
+                break
     
     # Enhance articles with full content scraping and API analysis
-    enhanced_articles = get_api_enhanced_incidents(unique_articles, use_api)
-        
-    # Sort incidents by vendor priority and severity
-    enhanced_articles = sorted(enhanced_articles, key=lambda x: (
-        calculate_vendor_priority(x.get('vendors', [])) + x.get('severity_score', 0)
-    ), reverse=True)
+    enhanced_articles = get_api_enhanced_incidents(distributed_articles, use_api)
     
-    # Limit number of incidents if specified
-    if max_incidents and isinstance(max_incidents, int) and max_incidents > 0:
-        enhanced_articles = enhanced_articles[:max_incidents]
+    # Sort by severity score from GPT analysis
+    enhanced_articles = sorted(enhanced_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
     
     # Store incidents in database
     for article in enhanced_articles:
@@ -1282,7 +1322,7 @@ def main():
     
     st.title("Cybersecurity Incidents Monitor")
     
-    # Sidebar controls - simplified
+    # Sidebar controls
     st.sidebar.header("Settings")
     
     # Display last update time from database
@@ -1298,11 +1338,8 @@ def main():
     except Exception:
         pass
     
-    days_to_look_back = st.sidebar.slider("Number of days to look back:", 1, 30, 2)
     max_incidents = st.sidebar.number_input("Number of incidents to display:", 1, 100, 5)
-    
-    # Set API enhancement to always be enabled
-    use_api = True
+    use_api = st.sidebar.checkbox("Use AI Analysis (slower but more detailed)", value=True)
     
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
@@ -1325,9 +1362,14 @@ def main():
             # Process sources in real-time
             all_articles = []
             sources_processed = 0
+            enough_articles = False
+            high_priority_articles = []
             
             # Process sources one by one instead of in parallel for streaming effect
             for i, source in enumerate(SOURCES):
+                if enough_articles:
+                    break
+                    
                 try:
                     # Update progress
                     progress = (i + 1) / len(SOURCES)
@@ -1335,7 +1377,7 @@ def main():
                     status_text.text(f"Processing source {i+1}/{len(SOURCES)}: {source['url']}")
                     
                     # Process the source
-                    articles = process_source(source, days_to_look_back)
+                    articles = process_source(source, 7)  # Using fixed 7 days lookback
                     
                     # Add to collection
                     all_articles.extend(articles)
@@ -1359,83 +1401,70 @@ def main():
                                 format_incident_card(temp_sorted[idx], idx + 1),
                                 unsafe_allow_html=True
                             )
+                        
+                        # Check if we have enough high-priority articles
+                        high_priority_articles = [article for article in temp_sorted if article.get('severity_score', 0) >= 80]
+                        if len(high_priority_articles) >= 5:
+                            enough_articles = True
+                            break
                             
                 except Exception as e:
                     status_text.text(f"Error processing {source['url']}: {str(e)}")
                     time.sleep(1)  # Brief pause to show the error
             
-            # Remove duplicates (based on title similarity)
-            unique_articles = []
-            titles_seen = set()
-            
-            for article in all_articles:
-                title = article['title'].lower()
-                # Skip if we've seen a very similar title
-                if not any(title in t or t in title for t in titles_seen):
-                    titles_seen.add(title)
-                    unique_articles.append(article)
-            
-            # Update status
-            status_text.text("Processing incident data and scraping full content...")
-            
-            # Process a subset for real-time display first
-            display_count = min(len(unique_articles), max_incidents)
-            for i in range(display_count):
-                try:
-                    # Update status for each article being processed
-                    article = unique_articles[i]
-                    status_text.text(f"Scraping content for: {article['title'][:50]}...")
-                    
-                    # Scrape full content
-                    if article.get('link'):
-                        scraped_data = scrape_full_content(article['link'])
-                        article['full_content'] = scraped_data['content']
-                        article['hyperlinks'] = scraped_data['hyperlinks']
-                        
-                        # If using API and content is insufficient, try PPLX
-                        if use_api and (not article['full_content'] or len(article['full_content']) < 500):
-                            status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
-                            pplx_data = enhance_with_pplx(
-                                article['link'],
-                                article['title'],
-                                article['full_content']
-                            )
-                            
-                            if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
-                                article['full_content'] = pplx_data['content']
-                                # Combine hyperlinks
-                                article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
-                    
-                    # Update card with new content
-                    incident_placeholders[i].markdown(
-                        format_incident_card(article, i + 1),
-                        unsafe_allow_html=True
-                    )
-                    
-                except Exception as e:
-                    print(f"Error processing article {i}: {e}")
-            
-            # Calculate vendor priority and enhanced analysis
-            status_text.text("Performing AI analysis on incident data...")
-            enhanced_articles = get_api_enhanced_incidents(unique_articles, use_api)
+            # Process the high-priority articles we found
+            if high_priority_articles:
+                status_text.text("Processing high-priority incidents...")
                 
-            # Sort incidents by severity and vendor priority
-            enhanced_articles = sorted(enhanced_articles, key=lambda x: (
-                calculate_vendor_priority(x.get('vendors', [])) + x.get('severity_score', 0)
-            ), reverse=True)
-            
-            # Limit to max_incidents
-            filtered_incidents = enhanced_articles[:max_incidents]
-            
-            if filtered_incidents:
-                st.subheader(f"Most Recent Cybersecurity Incidents")
-                for idx, incident in enumerate(filtered_incidents):
+                # Process each high-priority article
+                for i, article in enumerate(high_priority_articles[:5]):  # Only process first 5
+                    try:
+                        # Update status for each article being processed
+                        status_text.text(f"Scraping content for: {article['title'][:50]}...")
+                        
+                        # Scrape full content
+                        if article.get('link'):
+                            scraped_data = scrape_full_content(article['link'])
+                            article['full_content'] = scraped_data['content']
+                            article['hyperlinks'] = scraped_data['hyperlinks']
+                            
+                            # If using API and content is insufficient, try PPLX
+                            if use_api and (not article['full_content'] or len(article['full_content']) < 500):
+                                status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
+                                pplx_data = enhance_with_pplx(
+                                    article['link'],
+                                    article['title'],
+                                    article['full_content']
+                                )
+                                
+                                if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
+                                    article['full_content'] = pplx_data['content']
+                                    # Combine hyperlinks
+                                    article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
+                        
+                        # Update card with new content
+                        incident_placeholders[i].markdown(
+                            format_incident_card(article, i + 1),
+                            unsafe_allow_html=True
+                        )
+                        
+                    except Exception as e:
+                        print(f"Error processing article {i}: {e}")
+                
+                # Calculate vendor priority and enhanced analysis
+                status_text.text("Performing AI analysis on high-priority incidents...")
+                enhanced_articles = get_api_enhanced_incidents(high_priority_articles[:5], use_api)
+                
+                # Display final results
+                st.subheader("High-Priority Cybersecurity Incidents")
+                for idx, incident in enumerate(enhanced_articles):
                     st.markdown(
                         format_incident_card(incident, idx + 1),
                         unsafe_allow_html=True
                     )
             else:
-                st.info("No incidents found. Please try again or check your internet connection.")
+                st.info("No high-priority incidents found. Please try again or check your internet connection.")
+                
         except Exception as e:
             st.error(f"An error occurred while fetching incidents: {str(e)}")
             st.info("Please try again or check your internet connection.")
