@@ -262,17 +262,14 @@ def update_cache_timestamp(conn):
     conn.commit()
 
 def format_incident_card(incident, idx):
-    """Format a single incident as an HTML card without vulnerability tags."""
+    """Format a single incident as an HTML card with a brief summary."""
     severity_class = "high-severity" if incident.get("severity_score", 0) > 80 else "medium-severity" if incident.get("severity_score", 0) > 50 else "low-severity"
     
     # Format date nicely if available
     display_date = incident.get('date', 'Unknown date')
     if display_date and display_date != 'Unknown date':
         try:
-            # Try to standardize date format
             date_obj = None
-            
-            # Try common date formats
             date_formats = ["%Y-%m-%d", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"]
             for fmt in date_formats:
                 try:
@@ -284,7 +281,6 @@ def format_incident_card(incident, idx):
             if date_obj:
                 display_date = date_obj.strftime("%B %d, %Y")
         except:
-            # If date formatting fails, use as is
             pass
     
     # Clean and ensure the link is properly escaped and valid
@@ -294,52 +290,21 @@ def format_incident_card(incident, idx):
             link = '#'
             link_text = "Link unavailable"
         else:
-            link_text = link  # Show the full URL for sharing
+            link_text = link
         
-        # Create a direct link that displays the full URL for sharing
         link_html = f"<div class='incident-link-text'><a href='{link}' target='_blank' rel='noopener noreferrer' class='incident-link'>{link_text}</a></div>"
     except:
-        # Fallback if there's any issue with the link
         link_html = "<div class='incident-link-text'>Link unavailable</div>"
     
-    # Show all hyperlinks without limit
-    hyperlinks_html = ""
-    if incident.get('hyperlinks') and len(incident.get('hyperlinks', [])) > 0:
-        # Get unique hyperlinks
-        unique_hyperlinks = []
-        seen_urls = set()
-        for link in incident.get('hyperlinks', []):
-            # Normalize URL for comparison
-            normalized_url = link.rstrip('/')
-            if normalized_url not in seen_urls:
-                seen_urls.add(normalized_url)
-                unique_hyperlinks.append(link)
-        
-        # Show all unique hyperlinks
-        if unique_hyperlinks:
-            hyperlinks_html = "<div class='hyperlinks-container'><strong>Hyper Links:</strong><ul class='hyperlinks-list'>"
-            for link in unique_hyperlinks:
-                try:
-                    hyperlinks_html += f"<li><a href='{link}' target='_blank' rel='noopener noreferrer'>{link}</a></li>"
-                except:
-                    continue
-            hyperlinks_html += "</ul></div>"
-
-    # Add related articles section
-    related_articles_html = ""
-    if incident.get('related_articles'):
-        related_articles_html = "<div class='related-articles-container'><strong>Related Articles:</strong><ul class='related-articles-list'>"
-        for article in incident.get('related_articles', []):
-            try:
-                title = article.get('title', '')
-                link = article.get('link', '')
-                if title and link:
-                    related_articles_html += f"<li><a href='{link}' target='_blank' rel='noopener noreferrer'>{title}</a></li>"
-            except:
-                continue
-        related_articles_html += "</ul></div>"
-
-    # Create the full HTML for the incident card with properly escaped HTML
+    # Get the summary if available
+    summary = incident.get('summary', '')
+    if not summary and incident.get('description'):
+        # Use description as fallback if no summary
+        summary = incident.get('description')[:300] + "..."
+    
+    summary_html = f"<div class='incident-summary'>{summary}</div>" if summary else ""
+    
+    # Create the full HTML for the incident card
     html = f"""
     <div class="incident-card {severity_class}">
         <div class="incident-header">
@@ -348,11 +313,10 @@ def format_incident_card(incident, idx):
         <div class="incident-meta">
             Source: {incident.get('source_name', 'Unknown Source')} | Published: {display_date}
         </div>
+        {summary_html}
         <div class="incident-link-container">
             {link_html}
         </div>
-        {hyperlinks_html}
-        {related_articles_html}
     </div>
     """
     return html
@@ -904,7 +868,7 @@ def scrape_full_content(url):
 def enhance_with_pplx(url, title, content=""):
     """Use PPLX API to extract and analyze content from complex websites"""
     if not PPLX_API_KEY:
-        return {"content": content, "hyperlinks": []}
+        return {"content": content, "hyperlinks": [], "summary": ""}
         
     try:
         headers = {
@@ -912,29 +876,57 @@ def enhance_with_pplx(url, title, content=""):
             "Authorization": f"Bearer {PPLX_API_KEY}"
         }
         
-        payload = {
+        # First, get a brief summary
+        summary_payload = {
             "model": "llama-3.1-sonar-small-128k-online",
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a cybersecurity content extraction assistant. Extract the main content from the provided URL. Include all relevant technical details about security issues. Identify mentioned CVEs, affected vendors, and security impacts. Format the result as plain text with paragraph breaks."
+                    "content": "You are a cybersecurity content summarizer. Provide a 2-3 line concise summary of the key points from the article title and content. Focus on the impact, affected systems, and any critical details."
                 },
                 {
                     "role": "user",
-                    "content": f"Extract the main content from this cybersecurity article: {url}\nTitle: {title}\nProvide the full text content, preserving all technical details. Also extract all relevant hyperlinks to other security resources or references mentioned in the article."
+                    "content": f"Provide a 2-3 line summary of this cybersecurity article:\nTitle: {title}\nContent: {content[:2000]}"
+                }
+            ],
+            "max_tokens": 150
+        }
+        
+        summary_response = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers=headers,
+            json=summary_payload,
+        )
+        
+        summary = ""
+        if summary_response.status_code == 200:
+            result = summary_response.json()
+            summary = result["choices"][0]["message"]["content"].strip()
+        
+        # Then get the full content analysis
+        content_payload = {
+            "model": "llama-3.1-sonar-small-128k-online",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a cybersecurity content extraction assistant. Extract the main content from the provided URL. Include all relevant technical details about security issues."
+                },
+                {
+                    "role": "user",
+                    "content": f"Extract the main content from this cybersecurity article: {url}\nTitle: {title}"
                 }
             ],
             "max_tokens": 4000
         }
         
-        response = requests.post(
+        content_response = requests.post(
             "https://api.perplexity.ai/chat/completions",
             headers=headers,
-            json=payload,
+            json=content_payload,
         )
         
-        if response.status_code == 200:
-            result = response.json()
+        if content_response.status_code == 200:
+            result = content_response.json()
             extracted_content = result["choices"][0]["message"]["content"]
             
             # Extract hyperlinks from PPLX response
@@ -947,14 +939,15 @@ def enhance_with_pplx(url, title, content=""):
             
             return {
                 "content": cleaned_content if cleaned_content else content,
-                "hyperlinks": list(set(hyperlinks)) if hyperlinks else []
+                "hyperlinks": list(set(hyperlinks)) if hyperlinks else [],
+                "summary": summary
             }
         else:
-            return {"content": content, "hyperlinks": []}
+            return {"content": content, "hyperlinks": [], "summary": summary}
             
     except Exception as e:
         print(f"Error using PPLX API: {e}")
-        return {"content": content, "hyperlinks": []}
+        return {"content": content, "hyperlinks": [], "summary": ""}
 
 def analyze_with_openai(title, content, hyperlinks):
     """Use OpenAI to analyze and summarize content"""
@@ -1259,6 +1252,13 @@ def fetch_incidents(days_to_look_back=7, cache_hours=24, max_incidents=None, use
     return enhanced_articles, sources_processed
 
 def main():
+    # Initialize Streamlit session state
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = True
+        st.session_state.articles = []
+        st.session_state.last_update = None
+        st.session_state.processing = False
+
     st.set_page_config(page_title="Cybersecurity Incidents Monitor", layout="wide")
     
     # Custom CSS for better styling
@@ -1297,6 +1297,15 @@ def main():
         font-size: 14px;
         margin-bottom: 10px;
     }
+    .incident-summary {
+        font-size: 14px;
+        line-height: 1.4;
+        color: #333;
+        margin: 10px 0;
+        padding: 10px;
+        background-color: #f5f5f5;
+        border-radius: 4px;
+    }
     .incident-link-text {
         word-break: break-all;
         font-size: 14px;
@@ -1309,14 +1318,6 @@ def main():
         display: inline-block;
         width: 25px;
         color: #777;
-    }
-    .hyperlinks-container {
-        margin-top: 10px;
-        font-size: 14px;
-    }
-    .hyperlinks-list {
-        margin-top: 5px;
-        padding-left: 20px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -1335,6 +1336,7 @@ def main():
         result = cursor.fetchone()
         if result:
             last_update_time = datetime.datetime.fromisoformat(result[1])
+            st.session_state.last_update = last_update_time
             st.sidebar.info(f"Last update: {last_update_time.strftime('%Y-%m-%d %H:%M')}")
     except Exception:
         pass
@@ -1343,109 +1345,126 @@ def main():
     
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
-        # Create placeholder for dynamic updating
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        results_count = st.empty()
-        results_container = st.container()
-        
-        # Setup streaming display
-        with results_container:
-            incident_placeholders = []
-            for i in range(10):  # Fixed to 10 placeholders
-                incident_placeholders.append(st.empty())
-        
-        try:
-            # First update the status
-            status_text.text("Connecting to sources...")
+        if not st.session_state.processing:
+            st.session_state.processing = True
             
-            # Process sources in real-time
-            all_articles = []
-            sources_processed = 0
+            # Create placeholder for dynamic updating
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_count = st.empty()
+            results_container = st.container()
             
-            # Process sources one by one for streaming effect
-            for i, source in enumerate(SOURCES):
-                try:
-                    # Update progress
-                    progress = (i + 1) / len(SOURCES)
-                    progress_bar.progress(progress)
-                    status_text.text(f"Processing source {i+1}/{len(SOURCES)}: {source['url']}")
-                    
-                    # Process the source
-                    articles = process_source(source, 7)  # Using fixed 7 days lookback
-                    all_articles.extend(articles)
-                    sources_processed += 1
-                    
-                    # Update counter in real time
-                    results_count.text(f"Found {len(all_articles)} articles so far...")
-                    
-                    # If we have new articles, process and display them
-                    if articles:
-                        # Sort what we have so far by severity score
-                        temp_sorted = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
-                        
-                        # Show top 10 articles so far
-                        displayed_count = min(len(temp_sorted), 10)
-                        for idx in range(displayed_count):
-                            incident_placeholders[idx].markdown(
-                                format_incident_card(temp_sorted[idx], idx + 1),
-                                unsafe_allow_html=True
-                            )
-                            
-                except Exception as e:
-                    status_text.text(f"Error processing {source['url']}: {str(e)}")
-                    time.sleep(1)
+            # Setup streaming display
+            with results_container:
+                incident_placeholders = []
+                for i in range(10):  # Fixed to 10 placeholders
+                    incident_placeholders.append(st.empty())
             
-            # Final processing of top 10 articles
-            status_text.text("Processing final incidents...")
-            
-            # Sort all articles by severity score and take top 10
-            final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)[:10]
-            
-            # Process each article in the top 10
-            for i, article in enumerate(final_articles):
-                try:
-                    status_text.text(f"Scraping content for: {article['title'][:50]}...")
-                    
-                    # Scrape full content
-                    if article.get('link'):
-                        scraped_data = scrape_full_content(article['link'])
-                        article['full_content'] = scraped_data['content']
-                        article['hyperlinks'] = scraped_data['hyperlinks']
-                        
-                        # If using API and content is insufficient, try PPLX
-                        if use_api and (not article['full_content'] or len(article['full_content']) < 500):
-                            status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
-                            pplx_data = enhance_with_pplx(
-                                article['link'],
-                                article['title'],
-                                article['full_content']
-                            )
-                            
-                            if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
-                                article['full_content'] = pplx_data['content']
-                                article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
-                    
-                    # Update display with enhanced content
-                    incident_placeholders[i].markdown(
-                        format_incident_card(article, i + 1),
-                        unsafe_allow_html=True
-                    )
-                    
-                except Exception as e:
-                    print(f"Error processing article {i}: {e}")
-            
-            # Clear status messages
-            status_text.empty()
-            results_count.empty()
-            progress_bar.empty()
+            try:
+                # First update the status
+                status_text.text("Connecting to sources...")
                 
-        except Exception as e:
-            st.error(f"An error occurred while fetching incidents: {str(e)}")
-            st.info("Please try again or check your internet connection.")
+                # Process sources in real-time
+                all_articles = []
+                sources_processed = 0
+                
+                # Process sources one by one for streaming effect
+                for i, source in enumerate(SOURCES):
+                    try:
+                        # Update progress
+                        progress = (i + 1) / len(SOURCES)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing source {i+1}/{len(SOURCES)}: {source['url']}")
+                        
+                        # Process the source
+                        articles = process_source(source, 7)  # Using fixed 7 days lookback
+                        all_articles.extend(articles)
+                        sources_processed += 1
+                        
+                        # Update counter in real time
+                        results_count.text(f"Found {len(all_articles)} articles so far...")
+                        
+                        # If we have new articles, process and display them
+                        if articles:
+                            # Sort what we have so far by severity score
+                            temp_sorted = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
+                            
+                            # Show top 10 articles so far
+                            displayed_count = min(len(temp_sorted), 10)
+                            for idx in range(displayed_count):
+                                incident_placeholders[idx].markdown(
+                                    format_incident_card(temp_sorted[idx], idx + 1),
+                                    unsafe_allow_html=True
+                                )
+                                
+                    except Exception as e:
+                        status_text.text(f"Error processing {source['url']}: {str(e)}")
+                        time.sleep(1)
+                
+                # Final processing of top 10 articles
+                status_text.text("Processing final incidents...")
+                
+                # Sort all articles by severity score and take top 10
+                final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)[:10]
+                
+                # Store in session state
+                st.session_state.articles = final_articles
+                
+                # Process each article in the top 10
+                for i, article in enumerate(final_articles):
+                    try:
+                        status_text.text(f"Scraping content for: {article['title'][:50]}...")
+                        
+                        # Scrape full content
+                        if article.get('link'):
+                            scraped_data = scrape_full_content(article['link'])
+                            article['full_content'] = scraped_data['content']
+                            article['hyperlinks'] = scraped_data['hyperlinks']
+                            
+                            # If using API and content is insufficient, try PPLX
+                            if use_api and (not article['full_content'] or len(article['full_content']) < 500):
+                                status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
+                                pplx_data = enhance_with_pplx(
+                                    article['link'],
+                                    article['title'],
+                                    article['full_content']
+                                )
+                                
+                                if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
+                                    article['full_content'] = pplx_data['content']
+                                    article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
+                        
+                        # Update display with enhanced content
+                        incident_placeholders[i].markdown(
+                            format_incident_card(article, i + 1),
+                            unsafe_allow_html=True
+                        )
+                        
+                    except Exception as e:
+                        print(f"Error processing article {i}: {e}")
+                
+                # Clear status messages
+                status_text.empty()
+                results_count.empty()
+                progress_bar.empty()
+                    
+            except Exception as e:
+                st.error(f"An error occurred while fetching incidents: {str(e)}")
+                st.info("Please try again or check your internet connection.")
+            
+            finally:
+                st.session_state.processing = False
     else:
-        # Always display initial message if no cached results
-        st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest security news and incidents.")
+        # Display cached articles if available
+        if 'articles' in st.session_state and st.session_state.articles:
+            for idx, article in enumerate(st.session_state.articles[:10]):
+                st.markdown(
+                    format_incident_card(article, idx + 1),
+                    unsafe_allow_html=True
+                )
+        else:
+            # Display initial message if no cached results
+            st.info("Click the 'FETCH CYBERSECURITY INCIDENTS' button to get the latest security news and incidents.")
     
     # Close database connection
     try:
