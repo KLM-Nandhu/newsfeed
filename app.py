@@ -1375,7 +1375,7 @@ def main():
         col1, col2 = st.sidebar.columns(2)
         
         with col1:
-            if st.button("Previous 10"):
+            if st.button("<- 10"):
                 # Get the current set of shown incident IDs
                 current_ids = list(st.session_state.shown_incident_ids)
                 if len(current_ids) > 10:
@@ -1394,7 +1394,7 @@ def main():
                         st.rerun()
         
         with col2:
-            if st.button("Next 10"):
+            if st.button("-> 10"):
                 # Get next 10 unshown incidents
                 next_articles = []
                 for article in st.session_state.all_fetched_articles:
