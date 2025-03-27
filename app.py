@@ -1043,8 +1043,13 @@ def analyze_with_openai(title, content, hyperlinks):
         print(f"Error using OpenAI API: {e}")
         return {"impact": "", "mitigation": "", "severity_score": 50}
 
-def process_source(source, days_to_look_back):
-    """Process a source (RSS feed or web page) and extract articles"""
+def generate_article_id(article):
+    """Generate a unique ID for an article based on its title and link"""
+    unique_string = f"{article['title']}{article.get('link', '')}"
+    return hashlib.md5(unique_string.encode()).hexdigest()
+
+def process_source(source, days_to_look_back=7):
+    """Process a single source and return articles"""
     source_url = source["url"]
     source_type = source["type"]
     priority = source["priority"]
@@ -1053,65 +1058,61 @@ def process_source(source, days_to_look_back):
     if 'cve.org' in source_url.lower():
         return []
     
-    # For SANS ISC diary archive, modify URL to include year and month
-    if "isc.sans.edu/diaryarchive.html" in source_url and not "year=" in source_url:
-        current_date = datetime.datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-        source_url = f"https://isc.sans.edu/diaryarchive.html?year={current_year}&month={current_month}"
-    
-    if source_type == "rss":
-        # For RSS feeds, use feedparser
-        articles = extract_articles_from_rss(source_url, days_to_look_back)
-    else:
-        # For web pages, fetch and parse HTML
-        html_content = make_request(source_url)
-        if not html_content:
-            return []
-        articles = extract_articles_from_web(html_content, source_url, days_to_look_back)
-    
-    # Pre-process articles
-    processed_articles = []
-    for article in articles:
-        # Skip articles from CVE.org
-        if article.get('link') and 'cve.org' in article.get('link').lower():
-            continue
+    articles = []
+    try:
+        if source_type == "rss":
+            articles = extract_articles_from_rss(source_url, days_to_look_back)
+        elif source_type == "web":
+            html_content = make_request(source_url)
+            if html_content:
+                articles = extract_articles_from_web(html_content, source_url, days_to_look_back)
+        
+        # Process each article
+        processed_articles = []
+        for article in articles:
+            # Skip articles from CVE.org
+            if article.get('link') and 'cve.org' in article.get('link').lower():
+                continue
+                
+            # Try to scrape full content to get published date if not available
+            if article.get('date') == 'Unknown date' and article.get('link'):
+                scraped_data = scrape_full_content(article['link'])
+                if scraped_data.get('published_date'):
+                    article['date'] = format_date_string(scraped_data['published_date'])
             
-        # Try to scrape full content to get published date if not available
-        if article.get('date') == 'Unknown date' and article.get('link'):
-            scraped_data = scrape_full_content(article['link'])
-            if scraped_data.get('published_date'):
-                article['date'] = format_date_string(scraped_data['published_date'])
-        
-        # Skip articles without a valid date
-        if article.get('date') == 'Unknown date':
-            continue
-        
-        # Generate a unique ID for the incident
-        article["id"] = hashlib.md5(f"{article['title']}:{article['link']}".encode()).hexdigest()
-        
-        # Determine content type
-        article["type"] = determine_content_type(article['title'], article.get('description', ''))
-        
-        # Extract vendors
-        article["vendors"] = extract_vendors_from_text(f"{article['title']} {article.get('description', '')}")
-        
-        # Extract CVEs
-        article["cve_ids"] = extract_cves_from_text(f"{article['title']} {article.get('description', '')}")
-        
-        # Set default severity based on content type
-        if article["type"] == "vulnerability" or article["type"] == "attack":
-            article["severity"] = "high"
-            article["severity_score"] = 80
-        elif article["type"] == "patch":
-            article["severity"] = "medium"
-            article["severity_score"] = 60
-        else:
-            article["severity"] = "medium"
-            article["severity_score"] = 50
-        
-        processed_articles.append(article)
+            # Skip articles without a valid date
+            if article.get('date') == 'Unknown date':
+                continue
             
+            # Add source information and generate unique ID
+            article["source_priority"] = priority
+            article["id"] = generate_article_id(article)
+            
+            # Determine content type
+            article["type"] = determine_content_type(article['title'], article.get('description', ''))
+            
+            # Extract vendors
+            article["vendors"] = extract_vendors_from_text(f"{article['title']} {article.get('description', '')}")
+            
+            # Extract CVEs
+            article["cve_ids"] = extract_cves_from_text(f"{article['title']} {article.get('description', '')}")
+            
+            # Set default severity based on content type
+            if article["type"] == "vulnerability" or article["type"] == "attack":
+                article["severity"] = "high"
+                article["severity_score"] = 80
+            elif article["type"] == "patch":
+                article["severity"] = "medium"
+                article["severity_score"] = 60
+            else:
+                article["severity"] = "medium"
+                article["severity_score"] = 50
+            
+            processed_articles.append(article)
+            
+    except Exception as e:
+        print(f"Error processing source {source_url}: {e}")
+        
     return processed_articles
 
 def determine_content_type(title, description=""):
@@ -1280,6 +1281,8 @@ def main():
     if 'initialized' not in st.session_state:
         st.session_state.initialized = True
         st.session_state.articles = []
+        st.session_state.shown_incident_ids = set()  # Track shown incident IDs
+        st.session_state.all_fetched_articles = []   # Store all fetched articles
         st.session_state.last_update = None
         st.session_state.processing = False
 
@@ -1367,10 +1370,32 @@ def main():
     
     use_api = st.sidebar.checkbox("Use AI Analysis (slower but more detailed)", value=True)
     
+    # Add "Load Next 10 Incidents" button in sidebar
+    if st.sidebar.button("Load Next 10 Incidents"):
+        if len(st.session_state.all_fetched_articles) > 0:
+            # Get next 10 unshown incidents
+            next_articles = []
+            for article in st.session_state.all_fetched_articles:
+                if article['id'] not in st.session_state.shown_incident_ids and len(next_articles) < 10:
+                    next_articles.append(article)
+                    st.session_state.shown_incident_ids.add(article['id'])
+            
+            if next_articles:
+                st.session_state.articles = next_articles
+                # Clear existing display and show new incidents
+                st.experimental_rerun()
+            else:
+                st.sidebar.warning("No more new incidents available. Please fetch new incidents.")
+        else:
+            st.sidebar.warning("Please fetch incidents first using the main button.")
+
     # Set up a fetch button for manual refresh
     if st.button("FETCH CYBERSECURITY INCIDENTS"):
         if not st.session_state.processing:
             st.session_state.processing = True
+            # Reset tracking of shown incidents when fetching new ones
+            st.session_state.shown_incident_ids = set()
+            st.session_state.all_fetched_articles = []
             
             # Create placeholder for dynamic updating
             progress_bar = st.progress(0)
@@ -1428,44 +1453,21 @@ def main():
                 # Final processing of top 10 articles
                 status_text.text("Processing final incidents...")
                 
-                # Sort all articles by severity score and take top 10
-                final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)[:10]
+                # Sort all articles by severity score
+                final_articles = sorted(all_articles, key=lambda x: x.get('severity_score', 0), reverse=True)
+                
+                # Store all fetched articles
+                st.session_state.all_fetched_articles = final_articles
+                
+                # Take top 10 for initial display
+                display_articles = final_articles[:10]
+                
+                # Store shown incident IDs
+                for article in display_articles:
+                    st.session_state.shown_incident_ids.add(article['id'])
                 
                 # Store in session state
-                st.session_state.articles = final_articles
-                
-                # Process each article in the top 10
-                for i, article in enumerate(final_articles):
-                    try:
-                        status_text.text(f"Scraping content for: {article['title'][:50]}...")
-                        
-                        # Scrape full content
-                        if article.get('link'):
-                            scraped_data = scrape_full_content(article['link'])
-                            article['full_content'] = scraped_data['content']
-                            article['hyperlinks'] = scraped_data['hyperlinks']
-                            
-                            # If using API and content is insufficient, try PPLX
-                            if use_api and (not article['full_content'] or len(article['full_content']) < 500):
-                                status_text.text(f"Using AI to enhance content for: {article['title'][:50]}...")
-                                pplx_data = enhance_with_pplx(
-                                    article['link'],
-                                    article['title'],
-                                    article['full_content']
-                                )
-                                
-                                if pplx_data['content'] and len(pplx_data['content']) > len(article['full_content']):
-                                    article['full_content'] = pplx_data['content']
-                                    article['hyperlinks'] = list(set(article['hyperlinks'] + pplx_data['hyperlinks']))
-                        
-                        # Update display with enhanced content
-                        incident_placeholders[i].markdown(
-                            format_incident_card(article, i + 1),
-                            unsafe_allow_html=True
-                        )
-                        
-                    except Exception as e:
-                        print(f"Error processing article {i}: {e}")
+                st.session_state.articles = display_articles
                 
                 # Clear status messages
                 status_text.empty()
